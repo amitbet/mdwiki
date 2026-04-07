@@ -1,9 +1,7 @@
 /// <reference types="vite/client" />
 
-interface ImportMetaEnv {
-  readonly VITE_SPACE_KEY: string;
-}
-
-interface ImportMeta {
-  readonly env: ImportMetaEnv;
+declare module "turndown-plugin-gfm" {
+  export function gfm(service: unknown): void;
+  export function tables(service: unknown): void;
+  export function strikethrough(service: unknown): void;
 }

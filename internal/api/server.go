@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/oauth2"
 
+	"mdwiki/internal/appsettings"
 	"mdwiki/internal/config"
 	"mdwiki/internal/gitops"
 	"mdwiki/internal/indexbuilder"
@@ -40,6 +41,7 @@ type deviceFlowEntry struct {
 type Server struct {
 	Cfg      config.Config
 	Registry *space.Registry
+	Store    appsettings.Store
 	Sessions *session.Store
 	Hub      *wshub.Hub
 	oauth    oauth.Config
@@ -49,10 +51,11 @@ type Server struct {
 }
 
 // New creates API server.
-func New(cfg config.Config, reg *space.Registry, sess *session.Store, hub *wshub.Hub) *Server {
+func New(cfg config.Config, reg *space.Registry, store appsettings.Store, sess *session.Store, hub *wshub.Hub) *Server {
 	return &Server{
 		Cfg:      cfg,
 		Registry: reg,
+		Store:    store,
 		Sessions: sess,
 		Hub:      hub,
 		oauth: oauth.Config{
@@ -85,21 +88,27 @@ func (s *Server) Router() http.Handler {
 		r.Get("/api/dev/login", s.devLogin)
 	}
 
+	r.Get("/api/setup/status", s.getSetupStatus)
+	r.Post("/api/setup/init", s.setupInitialSpace)
+
 	r.Get("/api/spaces", s.listSpaces)
-	r.With(s.requireSession).Get("/api/session", s.getSession)
+	r.Get("/api/session", s.getSession)
 
 	r.Get("/auth/github", s.githubStart)
 	r.Get("/auth/github/callback", s.githubCallback)
 	r.Post("/auth/github/device/start", s.githubDeviceStart)
 	r.Get("/auth/github/device/poll", s.githubDevicePoll)
 
-	r.With(s.requireSession).Get("/api/spaces/{space}/page", s.getPage)
-	r.With(s.requireSession).Get("/api/spaces/{space}/git", s.gitConsole)
-	r.With(s.requireSession).Post("/api/spaces/{space}/page", s.savePage)
-	r.With(s.requireSession).Post("/api/spaces/{space}/index", s.reindexSpace)
-	r.With(s.requireSession).Post("/api/spaces/{space}/index-mdwiki", s.rebuildRoutingIndex)
+	r.Get("/api/spaces/{space}/page", s.getPage)
+	r.Get("/api/spaces/{space}/pages", s.listPages)
+	r.Post("/api/spaces/{space}/pages", s.createPage)
+	r.Post("/api/spaces/{space}/comments", s.addComment)
+	r.Get("/api/spaces/{space}/git", s.gitConsole)
+	r.Post("/api/spaces/{space}/page", s.savePage)
+	r.Post("/api/spaces/{space}/index", s.reindexSpace)
+	r.Post("/api/spaces/{space}/index-mdwiki", s.rebuildRoutingIndex)
 
-	r.With(s.requireSession).Get("/api/spaces/{space}/search", s.searchSpace)
+	r.Get("/api/spaces/{space}/search", s.searchSpace)
 
 	// WebSocket Yjs
 	r.With(s.requireSession).Get("/ws", s.handleWS)
@@ -124,13 +133,18 @@ func cors(origin string) func(http.Handler) http.Handler {
 }
 
 func (s *Server) listSpaces(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.Store.Load(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	var out []map[string]string
-	for _, sp := range s.Registry.Spaces {
+	for _, sp := range cfg.Spaces {
 		out = append(out, map[string]string{
 			"key":          sp.Key,
 			"display_name": sp.DisplayName,
-			"repo_url":     sp.RepoURL,
-			"branch":       sp.Branch,
+			"repo_url":     cfg.RootRepoPath,
+			"branch":       "main",
 		})
 	}
 	_ = json.NewEncoder(w).Encode(out)
@@ -140,7 +154,8 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
 	sid := sessionFromCookie(r)
 	sess, ok := s.Sessions.Get(sid)
 	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("null"))
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -326,20 +341,30 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 	if body.Path == "" {
 		body.Path = "README.md"
 	}
-	root, ent, ok := s.Registry.ResolveRoot(s.Cfg.DataDir, spaceKey)
+	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.Error(w, "unknown space", http.StatusNotFound)
 		return
 	}
-	sid := sessionFromCookie(r)
-	sess, _ := s.Sessions.Get(sid)
-	tok := s.pushToken(r)
-	if tok == "" {
-		http.Error(w, "no git token", http.StatusForbidden)
-		return
+	authorName := "mdwiki"
+	authorEmail := "local@mdwiki"
+	if sid := sessionFromCookie(r); sid != "" {
+		if sess, ok := s.Sessions.Get(sid); ok {
+			if strings.TrimSpace(sess.Name) != "" {
+				authorName = sess.Name
+			} else if strings.TrimSpace(sess.Login) != "" {
+				authorName = sess.Login
+			}
+			if strings.TrimSpace(sess.Login) != "" {
+				authorEmail = sess.Login + "@users.noreply.github.com"
+			}
+		}
 	}
-	email := sess.Login + "@users.noreply.github.com"
-	if err := gitops.WritePage(root, body.Path, body.Content, sess.Name, email, tok, body.CoAuthors); err != nil {
+	if err := gitops.WritePageLocal(root, body.Path, body.Content, authorName, authorEmail, body.CoAuthors); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -349,10 +374,10 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 		"ok":           true,
 		"path":         body.Path,
 		"commit":       commit,
-		"repo_url":     ent.RepoURL,
-		"branch":       ent.Branch,
+		"repo_url":     root,
+		"branch":       "main",
 		"display_name": ent.DisplayName,
-		"message":      "Committed and pushed to origin",
+		"message":      "Committed locally",
 	})
 }
 
@@ -362,15 +387,13 @@ func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
 	if path == "" {
 		path = "README.md"
 	}
-	root, _, ok := s.Registry.ResolveRoot(s.Cfg.DataDir, spaceKey)
-	if !ok {
-		http.Error(w, "unknown space", http.StatusNotFound)
+	root, _, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	ent := s.findSpace(spaceKey)
-	tok := s.pushToken(r)
-	if _, err := gitops.EnsureClone(root, ent.RepoURL, ent.Branch, tok); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if !ok {
+		http.Error(w, "unknown space", http.StatusNotFound)
 		return
 	}
 	_ = gitops.EnsureSpaceMeta(root, spaceKey)
@@ -390,15 +413,6 @@ func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) findSpace(key string) *space.SpaceEntry {
-	for i := range s.Registry.Spaces {
-		if s.Registry.Spaces[i].Key == key {
-			return &s.Registry.Spaces[i]
-		}
-	}
-	return nil
-}
-
 func (s *Server) pushToken(r *http.Request) string {
 	sid := sessionFromCookie(r)
 	sess, ok := s.Sessions.Get(sid)
@@ -410,7 +424,11 @@ func (s *Server) pushToken(r *http.Request) string {
 
 func (s *Server) reindexSpace(w http.ResponseWriter, r *http.Request) {
 	spaceKey := chi.URLParam(r, "space")
-	root, _, ok := s.Registry.ResolveRoot(s.Cfg.DataDir, spaceKey)
+	root, _, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.Error(w, "unknown space", http.StatusNotFound)
 		return
@@ -571,7 +589,11 @@ func (s *Server) devLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) rebuildRoutingIndex(w http.ResponseWriter, r *http.Request) {
 	spaceKey := chi.URLParam(r, "space")
-	root, _, ok := s.Registry.ResolveRoot(s.Cfg.DataDir, spaceKey)
+	root, _, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.Error(w, "unknown space", http.StatusNotFound)
 		return

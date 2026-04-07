@@ -21,9 +21,10 @@
   "$defs": {
     "message": {
       "type": "object",
-      "required": ["hash", "author_id", "created_at", "updated_at", "body"],
+      "required": ["hash_id", "position", "author_id", "created_at", "updated_at", "body"],
       "properties": {
-        "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "hash_id": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "position": { "type": "integer", "minimum": 0 },
         "author_id": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" },
         "updated_at": { "type": "string", "format": "date-time" },

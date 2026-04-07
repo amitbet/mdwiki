@@ -1,6 +1,7 @@
 package gitops
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,6 +32,17 @@ func EnsureClone(root, repoURL, branch, token string) (*git.Repository, error) {
 		opts.SingleBranch = true
 	}
 	return git.PlainClone(root, false, opts)
+}
+
+// EnsureRepo opens an existing git repository, or initializes a new one.
+func EnsureRepo(root string) (*git.Repository, error) {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
+		return git.PlainOpen(root)
+	}
+	return git.PlainInit(root, false)
 }
 
 func injectToken(repoURL, token string) string {
@@ -80,6 +92,9 @@ func WritePage(root, relPath, content, authorName, authorEmail, pusherToken stri
 	if _, err := w.Add(relPath); err != nil {
 		return err
 	}
+	if err := w.AddGlob("."); err != nil {
+		return err
+	}
 	msg := fmt.Sprintf("wiki: update %s", relPath)
 	if len(coAuthors) > 0 {
 		msg += "\n\n"
@@ -102,6 +117,53 @@ func WritePage(root, relPath, content, authorName, authorEmail, pusherToken stri
 		pushOpts.Auth = &githttp.BasicAuth{Username: "oauth2", Password: pusherToken}
 	}
 	return r.Push(pushOpts)
+}
+
+// WritePageLocal writes relative path content and creates a local commit.
+func WritePageLocal(root, relPath, content, authorName, authorEmail string, coAuthors []string) error {
+	full := filepath.Join(root, relPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		return err
+	}
+	r, err := EnsureRepo(root)
+	if err != nil {
+		return err
+	}
+	w, err := r.Worktree()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Add(relPath); err != nil {
+		return err
+	}
+	status, err := w.Status()
+	if err != nil {
+		return err
+	}
+	if status.IsClean() {
+		return nil
+	}
+	msg := fmt.Sprintf("wiki: update %s", relPath)
+	if len(coAuthors) > 0 {
+		msg += "\n\n"
+		for _, ca := range coAuthors {
+			msg += "Co-authored-by: " + ca + "\n"
+		}
+	}
+	_, err = w.Commit(msg, &git.CommitOptions{
+		Author: &object.Signature{
+			Name:  authorName,
+			Email: authorEmail,
+			When:  time.Now(),
+		},
+	})
+	if errors.Is(err, git.ErrEmptyCommit) {
+		return nil
+	}
+	return err
 }
 
 // EnsureSpaceMeta writes minimal .mdwiki/space.json if missing.

@@ -22,13 +22,14 @@ type ThreadFile struct {
 
 // MessageEntry is one comment version in the stack.
 type MessageEntry struct {
-	Hash       string  `json:"hash"`
-	AuthorID   string  `json:"author_id"`
-	CreatedAt  string  `json:"created_at"`
-	UpdatedAt  string  `json:"updated_at"`
-	Body       string  `json:"body"`
-	Replaces   *string `json:"replaces,omitempty"`
-	InReplyTo  *string `json:"in_reply_to,omitempty"`
+	HashID    string  `json:"hash_id"`
+	Position  int     `json:"position"`
+	AuthorID  string  `json:"author_id"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+	Body      string  `json:"body"`
+	Replaces  *string `json:"replaces,omitempty"`
+	InReplyTo *string `json:"in_reply_to,omitempty"`
 }
 
 // HashBody returns SHA-256 hex of canonical body for hashing.
@@ -38,16 +39,23 @@ func HashBody(authorID, body string) string {
 }
 
 // NewMessage creates a message entry with timestamps (UTC RFC3339).
-func NewMessage(authorID, body string) MessageEntry {
+func NewMessage(authorID, body string, position int) MessageEntry {
 	now := time.Now().UTC().Format(time.RFC3339)
 	hash := HashBody(authorID, body)
 	return MessageEntry{
-		Hash:      hash,
+		HashID:    hash,
+		Position:  position,
 		AuthorID:  authorID,
 		CreatedAt: now,
 		UpdatedAt: now,
 		Body:      body,
 	}
+}
+
+// PageKey returns a stable key for a page path.
+func PageKey(pagePath string) string {
+	h := sha256.Sum256([]byte(pagePath))
+	return hex.EncodeToString(h[:16])
 }
 
 // WriteThread writes `.mdwiki/comments/<pageKey>/<threadID>.json`.

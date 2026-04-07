@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"mdwiki/internal/api"
+	"mdwiki/internal/appsettings"
 	"mdwiki/internal/config"
 	"mdwiki/internal/redisx"
 	"mdwiki/internal/session"
@@ -21,9 +22,9 @@ func main() {
 
 	reg, err := space.LoadRegistry(cfg.RegistryPath)
 	if err != nil {
-		log.Printf("warning: no registry at %s: %v — create spaces-registry.yaml", cfg.RegistryPath, err)
 		reg = &space.Registry{}
 	}
+	store := appsettings.NewLocalFileStore(cfg.SettingsPath)
 
 	var redisPub wshub.RedisPubSub
 	if r, err := redisx.New(os.Getenv("MDWIKI_REDIS_URL")); err != nil {
@@ -36,7 +37,7 @@ func main() {
 	go hub.Run()
 
 	sess := session.NewStore()
-	srv := api.New(cfg, reg, sess, hub)
+	srv := api.New(cfg, reg, store, sess, hub)
 	log.Printf("mdwiki listening %s", cfg.ListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, srv.Router()))
 }

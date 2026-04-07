@@ -19,14 +19,17 @@ export MDWIKI_FRONTEND_ORIGIN := $(FRONTEND_ORIGIN)
 export MDWIKI_GITHUB_CLIENT_ID
 export MDWIKI_GITHUB_CALLBACK
 
-.PHONY: dev server ui build install env-check
+.PHONY: dev server server-live ui build install env-check
 
 ## Run Go server and Vite dev server in parallel (open http://localhost:$(UI_PORT))
 dev:
-	$(MAKE) -j2 server ui
+	$(MAKE) -j2 server-live ui
 
 server:
 	MDWIKI_LISTEN=:$(SERVER_PORT) go run ./cmd/wiki
+
+server-live:
+	MDWIKI_LISTEN=:$(SERVER_PORT) air -c .air.toml
 
 ui:
 	cd web && MDWIKI_BACKEND=$(BACKEND_URL) npm run dev -- --port $(UI_PORT) --host localhost
@@ -34,6 +37,7 @@ ui:
 install:
 	cd web && npm install
 	go mod download
+	go install github.com/air-verse/air@latest
 
 build: install
 	cd web && npm run build

@@ -7,16 +7,17 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	ListenAddr       string
-	DataDir          string
-	RegistryPath     string // spaces-registry.yaml
-	GitHubClientID   string
-	GitHubSecret     string
+	ListenAddr        string
+	DataDir           string
+	RegistryPath      string // spaces-registry.yaml
+	SettingsPath      string // local JSON storage for root repo + spaces
+	GitHubClientID    string
+	GitHubSecret      string
 	GitHubCallbackURL string
-	SessionSecret    string
-	RedisURL         string // empty = single-instance mode
-	ServerGitToken   string // PAT or app token for clone/fallback push
-	FrontendOrigin   string // CORS
+	SessionSecret     string
+	RedisURL          string // empty = single-instance mode
+	ServerGitToken    string // PAT or app token for clone/fallback push
+	FrontendOrigin    string // CORS
 }
 
 func FromEnv() Config {
@@ -24,6 +25,7 @@ func FromEnv() Config {
 		ListenAddr:        get("MDWIKI_LISTEN", ":8080"),
 		DataDir:           get("MDWIKI_DATA", "./data"),
 		RegistryPath:      get("MDWIKI_REGISTRY", "./spaces-registry.yaml"),
+		SettingsPath:      get("MDWIKI_SETTINGS_PATH", "./data/settings.json"),
 		GitHubClientID:    os.Getenv("MDWIKI_GITHUB_CLIENT_ID"),
 		GitHubSecret:      os.Getenv("MDWIKI_GITHUB_CLIENT_SECRET"),
 		GitHubCallbackURL: get("MDWIKI_GITHUB_CALLBACK", "http://localhost:8080/auth/github/callback"),

@@ -9,33 +9,26 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
-
-	"mdwiki/internal/gitops"
 )
 
 // GET /api/spaces/{space}/git — read-only git snapshot (branch, status, recent log).
 func (s *Server) gitConsole(w http.ResponseWriter, r *http.Request) {
 	spaceKey := chi.URLParam(r, "space")
-	root, ent, ok := s.Registry.ResolveRoot(s.Cfg.DataDir, spaceKey)
+	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if !ok {
 		http.Error(w, "unknown space", http.StatusNotFound)
-		return
-	}
-	tok := s.pushToken(r)
-	if tok == "" {
-		http.Error(w, "no git token", http.StatusForbidden)
-		return
-	}
-	if _, err := gitops.EnsureClone(root, ent.RepoURL, ent.Branch, tok); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	out := gitConsoleSnapshot(root)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"output":       out,
-		"repo_url":     ent.RepoURL,
-		"branch":       ent.Branch,
+		"repo_url":     root,
+		"branch":       "main",
 		"space_key":    spaceKey,
 		"display_name": ent.DisplayName,
 	})

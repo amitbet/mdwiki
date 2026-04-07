@@ -1,0 +1,14 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  cmd = "go build -o ./tmp/mdwiki ./cmd/wiki"
+  bin = "./tmp/mdwiki"
+  full_bin = "MDWIKI_LISTEN=${MDWIKI_LISTEN} ./tmp/mdwiki"
+  delay = 200
+  include_ext = ["go"]
+  exclude_dir = ["web", "node_modules", "tmp", "bin", "data"]
+  stop_on_error = true
+
+[log]
+  time = true
