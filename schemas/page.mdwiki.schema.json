@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdwiki.local/schemas/page.mdwiki.schema.json",
+  "title": "mdwiki page metadata (no comment bodies)",
+  "type": "object",
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "title": { "type": "string" },
+    "slug": { "type": "string" },
+    "parent_page_id": { "type": ["string", "null"] }
+  },
+  "additionalProperties": false
+}

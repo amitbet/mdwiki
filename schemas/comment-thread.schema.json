@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdwiki.local/schemas/comment-thread.schema.json",
+  "title": "mdwiki single comment thread file",
+  "type": "object",
+  "required": ["schema_version", "thread_id", "anchor_id", "messages"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "thread_id": { "type": "string", "format": "uuid" },
+    "anchor_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "type": "string",
+      "enum": ["open", "resolved", "discarded"]
+    },
+    "messages": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/message" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "message": {
+      "type": "object",
+      "required": ["hash", "author_id", "created_at", "updated_at", "body"],
+      "properties": {
+        "hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "author_id": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "body": { "type": "string" },
+        "replaces": { "type": ["string", "null"] },
+        "in_reply_to": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    }
+  }
+}

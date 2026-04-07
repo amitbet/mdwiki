@@ -1,0 +1,7 @@
+# Example registry: copy to MDWIKI_REGISTRY path (default ./spaces-registry.yaml)
+spaces:
+  - key: demo
+    display_name: Demo space
+    repo_url: https://github.com/octocat/Hello-World.git
+    branch: main
+    # local_path: demo   # optional: subdirectory under MDWIKI_DATA/spaces/

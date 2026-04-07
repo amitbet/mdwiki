@@ -1,0 +1,3 @@
+# Copy to local.mk and fill in (local.mk is gitignored — do not commit).
+MDWIKI_GITHUB_CLIENT_SECRET ?= example-secret
+export MDWIKI_GITHUB_CLIENT_SECRET

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdwiki.local/schemas/index.schema.json",
+  "title": "mdwiki .mdwiki/index.json",
+  "type": "object",
+  "required": ["schema_version", "space_id", "pages"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "space_id": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_id", "path", "title"],
+        "properties": {
+          "page_id": { "type": "string" },
+          "path": { "type": "string" },
+          "title": { "type": "string" },
+          "parent_page_id": { "type": ["string", "null"] },
+          "slug": { "type": "string" }
+        }
+      }
+    }
+  }
+}

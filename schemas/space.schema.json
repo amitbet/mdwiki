@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdwiki.local/schemas/space.schema.json",
+  "title": "mdwiki space.json",
+  "type": "object",
+  "required": ["schema_version", "space_id"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "space_id": { "type": "string", "minLength": 1 },
+    "display_name": { "type": "string" },
+    "default_branch": { "type": "string", "default": "main" }
+  },
+  "additionalProperties": true
+}
