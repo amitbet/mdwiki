@@ -31,6 +31,7 @@ type gitWriteJob struct {
 	ToPath      string   `json:"to_path,omitempty"`
 	AuthorName  string   `json:"author_name"`
 	AuthorEmail string   `json:"author_email"`
+	PushUser    string   `json:"push_user"`
 	PushToken   string   `json:"push_token"`
 	CoAuthors   []string `json:"co_authors,omitempty"`
 	StrictPush  bool     `json:"strict_push"`
@@ -164,7 +165,7 @@ func runGitWriteJob(job gitWriteJob) gitWriteResult {
 		if err := gitops.WritePageLocal(job.RepoRoot, job.Branch, job.Path, job.Content, job.AuthorName, job.AuthorEmail, job.CoAuthors); err != nil {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
-		pushErr := gitops.Push(job.RepoRoot, job.PushToken, job.Branch)
+		pushErr := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch)
 		msg := "Committed and pushed"
 		if pushErr != nil {
 			msg = "Committed locally; push failed: " + pushErr.Error()
@@ -180,7 +181,7 @@ func runGitWriteJob(job gitWriteJob) gitWriteResult {
 		if err := gitops.RenameFileLocal(job.RepoRoot, job.Branch, job.FromPath, job.ToPath, job.AuthorName, job.AuthorEmail); err != nil {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
-		if err := gitops.Push(job.RepoRoot, job.PushToken, job.Branch); err != nil {
+		if err := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch); err != nil {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
 		return gitWriteResult{OK: true, Path: job.ToPath, Message: "Committed and pushed"}
@@ -189,7 +190,7 @@ func runGitWriteJob(job gitWriteJob) gitWriteResult {
 		if err := gitops.DeleteFileLocal(job.RepoRoot, job.Branch, job.Path, job.AuthorName, job.AuthorEmail); err != nil {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
-		if err := gitops.Push(job.RepoRoot, job.PushToken, job.Branch); err != nil {
+		if err := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch); err != nil {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
 		return gitWriteResult{OK: true, Path: job.Path, Message: "Committed and pushed"}

@@ -392,7 +392,7 @@ func (s *Server) resolveComment(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := gitops.Push(repoRoot, s.pushToken(r), branch); err != nil {
+		if err := gitops.Push(repoRoot, s.pushAuthUsername(r), s.pushToken(r), branch); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

@@ -75,6 +75,21 @@ func New(cfg config.Config, reg *space.Registry, store appsettings.Store, sess *
 	return srv
 }
 
+// BootstrapRootRepo ensures the root wiki repository is available locally at startup.
+// It intentionally does not clone any repo-backed space remotes; those stay lazy-loaded on access.
+func (s *Server) BootstrapRootRepo(ctx context.Context) error {
+	cfg, err := s.loadSettings(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, "git", s.Cfg.ServerGitToken); err != nil {
+		if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) searchForSpace(key string) (*search.Conn, error) {
 	path := filepath.Join(s.Cfg.DataDir, "search", key+".sqlite")
 	return search.Open(path)
@@ -431,6 +446,7 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 			Content:     body.Content,
 			AuthorName:  authorName,
 			AuthorEmail: authorEmail,
+			PushUser:    s.pushAuthUsername(r),
 			PushToken:   s.pushToken(r),
 			CoAuthors:   body.CoAuthors,
 		})
@@ -493,6 +509,15 @@ func (s *Server) pushToken(r *http.Request) string {
 		return sess.AccessToken
 	}
 	return s.Cfg.ServerGitToken
+}
+
+func (s *Server) pushAuthUsername(r *http.Request) string {
+	sid := sessionFromCookie(r)
+	sess, ok := s.Sessions.Get(sid)
+	if ok && strings.TrimSpace(sess.Login) != "" {
+		return strings.TrimSpace(sess.Login)
+	}
+	return "git"
 }
 
 func (s *Server) reindexSpace(w http.ResponseWriter, r *http.Request) {

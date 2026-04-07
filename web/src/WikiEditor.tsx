@@ -547,6 +547,54 @@ export default function WikiEditor({
   }, [dirty]);
 
   useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!dirtyRef.current) {
+        return;
+      }
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    };
+  }, []);
+
+  const confirmLeaveDirtyPage = useCallback(() => {
+    if (!dirtyRef.current) {
+      return true;
+    }
+    return window.confirm("You have unsaved changes on this page. Leave this page anyway?");
+  }, []);
+
+  const navigateToPath = useCallback(
+    (nextPath: string) => {
+      if (nextPath === path) {
+        return;
+      }
+      if (!confirmLeaveDirtyPage()) {
+        return;
+      }
+      setPageContextMenu(null);
+      onPathChange(nextPath);
+    },
+    [confirmLeaveDirtyPage, onPathChange, path],
+  );
+
+  const navigateToSpace = useCallback(
+    (nextSpace: string) => {
+      if (nextSpace === space) {
+        return;
+      }
+      if (!confirmLeaveDirtyPage()) {
+        return;
+      }
+      onSpaceChange(nextSpace);
+    },
+    [confirmLeaveDirtyPage, onSpaceChange, space],
+  );
+
+  useEffect(() => {
     if (!editor) {
       return;
     }
@@ -1476,7 +1524,7 @@ export default function WikiEditor({
           }}
         >
           Space
-          <select value={space} onChange={(e) => onSpaceChange(e.target.value)}>
+          <select value={space} onChange={(e) => navigateToSpace(e.target.value)}>
             {spaces.map((s) => (
               <option key={s.key} value={s.key}>
                 {s.display_name || s.key}
@@ -1565,10 +1613,7 @@ export default function WikiEditor({
           <Tree
             nodes={tree}
             activePath={path}
-            onSelect={(nextPath) => {
-              setPageContextMenu(null);
-              onPathChange(nextPath);
-            }}
+            onSelect={navigateToPath}
             onPageContextMenu={(e, pagePath) => {
               e.preventDefault();
               e.stopPropagation();

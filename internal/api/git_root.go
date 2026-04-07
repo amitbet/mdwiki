@@ -8,7 +8,7 @@ import (
 )
 
 // resolveRepoPath maps a path relative to a space root into the containing git repo root.
-// It prefers the outermost git root so accidental nested repos don't hijack writes.
+// It prefers the nearest git root to avoid hijacking writes to an unrelated parent repo.
 func resolveRepoPath(spaceRoot, relPath string) (repoRoot, repoRelPath string, err error) {
 	absRoot, err := filepath.Abs(spaceRoot)
 	if err != nil {
@@ -16,7 +16,7 @@ func resolveRepoPath(spaceRoot, relPath string) (repoRoot, repoRelPath string, e
 	}
 	full := filepath.Join(absRoot, filepath.FromSlash(relPath))
 
-	root, err := outermostGitRoot(absRoot)
+	root, err := nearestGitRoot(absRoot)
 	if err != nil {
 		return "", "", err
 	}
@@ -31,12 +31,11 @@ func resolveRepoPath(spaceRoot, relPath string) (repoRoot, repoRelPath string, e
 	return root, rel, nil
 }
 
-func outermostGitRoot(start string) (string, error) {
+func nearestGitRoot(start string) (string, error) {
 	cur := start
-	found := ""
 	for {
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
-			found = cur
+			return cur, nil
 		}
 		parent := filepath.Dir(cur)
 		if parent == cur {
@@ -44,8 +43,5 @@ func outermostGitRoot(start string) (string, error) {
 		}
 		cur = parent
 	}
-	if found == "" {
-		return "", fmt.Errorf("no git repository found for %s", start)
-	}
-	return found, nil
+	return "", fmt.Errorf("no git repository found for %s", start)
 }

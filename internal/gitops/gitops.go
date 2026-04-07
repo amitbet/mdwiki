@@ -21,7 +21,7 @@ type Service struct {
 }
 
 // EnsureClone clones repoURL into root if missing.
-func EnsureClone(root, repoURL, branch, token string) (*git.Repository, error) {
+func EnsureClone(root, repoURL, branch, authUser, token string) (*git.Repository, error) {
 	normalizedBranch := normalizeBranchName(branch)
 	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
 		r, openErr := git.PlainOpen(root)
@@ -37,7 +37,7 @@ func EnsureClone(root, repoURL, branch, token string) (*git.Repository, error) {
 		return r, nil
 	}
 	_ = os.MkdirAll(filepath.Dir(root), 0o755)
-	url := injectToken(repoURL, token)
+	url := injectToken(repoURL, authUser, token)
 	opts := &git.CloneOptions{URL: url}
 	if normalizedBranch != "" {
 		opts.ReferenceName = plumbing.NewBranchReferenceName(normalizedBranch)
@@ -95,12 +95,16 @@ func EnsureRepo(root string) (*git.Repository, error) {
 	return git.PlainInit(root, false)
 }
 
-func injectToken(repoURL, token string) string {
+func injectToken(repoURL, authUser, token string) string {
 	if token == "" {
 		return repoURL
 	}
+	user := strings.TrimSpace(authUser)
+	if user == "" {
+		user = "git"
+	}
 	if strings.HasPrefix(repoURL, "https://") {
-		return strings.Replace(repoURL, "https://", "https://oauth2:"+token+"@", 1)
+		return strings.Replace(repoURL, "https://", "https://"+user+":"+token+"@", 1)
 	}
 	return repoURL
 }
@@ -122,7 +126,7 @@ func normalizeBranchName(branch string) string {
 }
 
 // Pull fast-forwards origin.
-func Pull(root, token string) error {
+func Pull(root, authUser, token string) error {
 	r, err := git.PlainOpen(root)
 	if err != nil {
 		return err
@@ -133,7 +137,11 @@ func Pull(root, token string) error {
 	}
 	opts := &git.PullOptions{RemoteName: "origin"}
 	if token != "" {
-		opts.Auth = &githttp.BasicAuth{Username: "oauth2", Password: token}
+		user := strings.TrimSpace(authUser)
+		if user == "" {
+			user = "git"
+		}
+		opts.Auth = &githttp.BasicAuth{Username: user, Password: token}
 	}
 	return w.Pull(opts)
 }
@@ -148,7 +156,7 @@ func WriteFileOnly(root, relPath, content string) error {
 }
 
 // Push pushes local commits to origin when configured.
-func Push(root, token, branch string) error {
+func Push(root, authUser, token, branch string) error {
 	r, err := git.PlainOpen(root)
 	if err != nil {
 		return err
@@ -159,7 +167,11 @@ func Push(root, token, branch string) error {
 		gitcfg.RefSpec("+" + "HEAD:refs/heads/" + targetBranch),
 	}
 	if token != "" {
-		opts.Auth = &githttp.BasicAuth{Username: "oauth2", Password: token}
+		user := strings.TrimSpace(authUser)
+		if user == "" {
+			user = "git"
+		}
+		opts.Auth = &githttp.BasicAuth{Username: user, Password: token}
 	}
 	err = r.Push(opts)
 	if errors.Is(err, git.NoErrAlreadyUpToDate) {

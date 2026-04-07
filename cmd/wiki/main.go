@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -40,6 +41,9 @@ func main() {
 
 	sess := session.NewStore()
 	srv := api.New(cfg, reg, store, sess, hub, redisSvc)
+	if err := srv.BootstrapRootRepo(context.Background()); err != nil {
+		log.Fatalf("bootstrap root repo: %v", err)
+	}
 	log.Printf("mdwiki listening %s", cfg.ListenAddr)
 	log.Fatal(http.ListenAndServe(cfg.ListenAddr, srv.Router()))
 }

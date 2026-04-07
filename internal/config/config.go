@@ -10,7 +10,7 @@ type Config struct {
 	ListenAddr        string
 	DataDir           string
 	RegistryPath      string // spaces-registry.yaml
-	SettingsPath      string // local JSON storage for root repo + spaces
+	SettingsPath      string // local JSON storage for node-local runtime overrides
 	RootRepoURL       string // default root git repo URL
 	RootRepoBranch    string
 	RootRepoLocalDir  string // local clone directory for root repo
@@ -33,8 +33,8 @@ func FromEnv() Config {
 		SettingsPath:      get("MDWIKI_SETTINGS_PATH", "./data/settings.json"),
 		RootRepoURL:       get("MDWIKI_ROOT_GIT_REPO", "https://github.com/amitbet/documents"),
 		RootRepoBranch:    get("MDWIKI_ROOT_GIT_BRANCH", "main"),
-		RootRepoLocalDir:  get("MDWIKI_ROOT_LOCAL_DIR", "./data/root-git-repo"),
-		StorageDir:        get("MDWIKI_STORAGE_DIR", "./data/storage"),
+		RootRepoLocalDir:  get("MDWIKI_ROOT_LOCAL_DIR", "/tmp/mdwiki/repos/root"),
+		StorageDir:        get("MDWIKI_STORAGE_DIR", "/tmp/mdwiki/state"),
 		SpaceSettingsFile: get("MDWIKI_SPACE_SETTINGS_FILE", "mdwiki.spaces.json"),
 		GitHubClientID:    os.Getenv("MDWIKI_GITHUB_CLIENT_ID"),
 		GitHubSecret:      os.Getenv("MDWIKI_GITHUB_CLIENT_SECRET"),

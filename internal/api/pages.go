@@ -69,7 +69,7 @@ func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	spaceKey := chi.URLParam(r, "space")
-	root, _, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -98,9 +98,59 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seed := "# New Page\n\nStart writing here.\n"
-	if err := os.WriteFile(full, []byte(seed), 0o644); err != nil {
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	saveMode := normalizeSaveMode(cfg.SaveMode)
+	branch := strings.TrimSpace(ent.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(cfg.RootRepoBranch)
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	if saveMode == "local" {
+		if err := os.WriteFile(full, []byte(seed), 0o644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		authorName := "mdwiki"
+		authorEmail := "local@mdwiki"
+		if sid := sessionFromCookie(r); sid != "" {
+			if sess, ok := s.Sessions.Get(sid); ok {
+				if strings.TrimSpace(sess.Name) != "" {
+					authorName = sess.Name
+				} else if strings.TrimSpace(sess.Login) != "" {
+					authorName = sess.Login
+				}
+				if strings.TrimSpace(sess.Login) != "" {
+					authorEmail = sess.Login + "@users.noreply.github.com"
+				}
+			}
+		}
+		repoRoot, repoRelPath, err := resolveRepoPath(root, relPath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := s.executeGitWrite(r.Context(), gitWriteJob{
+			ID:          session.NewID(),
+			Op:          "save",
+			RepoRoot:    repoRoot,
+			Branch:      branch,
+			Path:        repoRelPath,
+			Content:     seed,
+			AuthorName:  authorName,
+			AuthorEmail: authorEmail,
+			PushUser:    s.pushAuthUsername(r),
+			PushToken:   s.pushToken(r),
+		}); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	s.Hub.BroadcastControlToSpace(spaceKey, wshub.Control{Type: wshub.MsgPagesInvalidated})
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": relPath, "content": seed})
@@ -211,6 +261,7 @@ func (s *Server) renamePage(w http.ResponseWriter, r *http.Request) {
 			ToPath:      repoRelTo,
 			AuthorName:  authorName,
 			AuthorEmail: authorEmail,
+			PushUser:    s.pushAuthUsername(r),
 			PushToken:   s.pushToken(r),
 			StrictPush:  true,
 		})
@@ -301,6 +352,7 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 			Path:        repoRelPath,
 			AuthorName:  authorName,
 			AuthorEmail: authorEmail,
+			PushUser:    s.pushAuthUsername(r),
 			PushToken:   s.pushToken(r),
 			StrictPush:  true,
 		})

@@ -100,8 +100,8 @@ function SetupScreen({
   initialSettings?: SetupStatus["settings"];
   onConfigured: () => void;
 }) {
-  const [rootRepoLocalDir, setRootRepoLocalDir] = useState(initialSettings?.root_repo_local_dir ?? "./data/root-git-repo");
-  const [storageDir, setStorageDir] = useState(initialSettings?.storage_dir ?? "./data/storage");
+  const [rootRepoLocalDir, setRootRepoLocalDir] = useState(initialSettings?.root_repo_local_dir ?? "/tmp/mdwiki/repos/root");
+  const [storageDir, setStorageDir] = useState(initialSettings?.storage_dir ?? "/tmp/mdwiki/state");
   const [spaceKey, setSpaceKey] = useState("main");
   const [spaceName, setSpaceName] = useState("Main Space");
   const [busy, setBusy] = useState(false);
@@ -144,7 +144,7 @@ function SetupScreen({
           <input
             value={rootRepoLocalDir}
             onChange={(e) => setRootRepoLocalDir(e.target.value)}
-            placeholder="./data/root-git-repo"
+            placeholder="/tmp/mdwiki/repos/root"
           />
         </label>
 
@@ -153,7 +153,7 @@ function SetupScreen({
           <input
             value={storageDir}
             onChange={(e) => setStorageDir(e.target.value)}
-            placeholder="./data/storage"
+            placeholder="/tmp/mdwiki/state"
           />
         </label>
 

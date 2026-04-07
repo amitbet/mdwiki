@@ -2,9 +2,13 @@ package api
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +21,7 @@ import (
 )
 
 var keyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]*$`)
+var repoKeySanitizer = regexp.MustCompile(`[^a-z0-9._-]+`)
 
 type setupRequest struct {
 	RootLocalDir   string `json:"root_repo_local_dir"`
@@ -34,11 +39,11 @@ func absOr(value, fallback string) (string, error) {
 }
 
 func (s *Server) defaultSettings() (appsettings.Settings, error) {
-	rootLocal, err := absOr(s.Cfg.RootRepoLocalDir, "./data/root-git-repo")
+	rootLocal, err := absOr(s.Cfg.RootRepoLocalDir, "/tmp/mdwiki/repos/root")
 	if err != nil {
 		return appsettings.Settings{}, err
 	}
-	storageDir, err := absOr(s.Cfg.StorageDir, "./data/storage")
+	storageDir, err := absOr(s.Cfg.StorageDir, "/tmp/mdwiki/state")
 	if err != nil {
 		return appsettings.Settings{}, err
 	}
@@ -64,6 +69,59 @@ func normalizeSaveMode(mode string) string {
 
 func (s *Server) rootSettingsPath(cfg appsettings.Settings) string {
 	return filepath.Join(cfg.RootRepoLocalDir, s.Cfg.SpaceSettingsFile)
+}
+
+func repoBaseDir(rootRepoLocalDir string) string {
+	return filepath.Dir(rootRepoLocalDir)
+}
+
+func sanitizeRepoKey(s string) string {
+	out := strings.ToLower(strings.TrimSpace(s))
+	out = strings.ReplaceAll(out, "/", "-")
+	out = repoKeySanitizer.ReplaceAllString(out, "-")
+	for strings.Contains(out, "--") {
+		out = strings.ReplaceAll(out, "--", "-")
+	}
+	out = strings.Trim(out, "-_.")
+	if out == "" {
+		return "repo"
+	}
+	if len(out) > 48 {
+		out = strings.Trim(out[:48], "-_.")
+		if out == "" {
+			out = "repo"
+		}
+	}
+	return out
+}
+
+func repoDirKey(repoURL string) string {
+	normalized := strings.TrimSpace(repoURL)
+	if normalized == "" {
+		return "repo-unknown"
+	}
+	if u, err := url.Parse(normalized); err == nil {
+		host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+		path := strings.Trim(strings.TrimSpace(u.EscapedPath()), "/")
+		if unescaped, unescErr := url.PathUnescape(path); unescErr == nil {
+			path = unescaped
+		}
+		path = strings.TrimSuffix(strings.ToLower(path), ".git")
+		switch {
+		case host != "" && path != "":
+			normalized = fmt.Sprintf("%s/%s", host, path)
+		case host != "":
+			normalized = host
+		}
+	}
+	base := sanitizeRepoKey(normalized)
+	sum := sha1.Sum([]byte(strings.ToLower(strings.TrimSpace(normalized))))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	return fmt.Sprintf("%s-%s", base, suffix)
+}
+
+func defaultCloneDirForRepo(rootRepoLocalDir, repoURL string) string {
+	return filepath.Join(repoBaseDir(rootRepoLocalDir), repoDirKey(repoURL))
 }
 
 func (s *Server) loadSettings(ctx context.Context) (appsettings.Settings, error) {
@@ -103,17 +161,14 @@ func (s *Server) loadSettings(ctx context.Context) (appsettings.Settings, error)
 	if err := json.Unmarshal(b, &rootCfg); err != nil {
 		return appsettings.Settings{}, err
 	}
-	if strings.TrimSpace(rootCfg.RootRepoLocalDir) == "" {
-		rootCfg.RootRepoLocalDir = cfg.RootRepoLocalDir
-	}
+	// Local filesystem locations are node-specific and must always come from local settings/env.
+	rootCfg.RootRepoLocalDir = cfg.RootRepoLocalDir
 	// Never allow persisted root settings to override env root repo URL.
 	rootCfg.RootRepoURL = def.RootRepoURL
 	if strings.TrimSpace(rootCfg.RootRepoBranch) == "" {
 		rootCfg.RootRepoBranch = cfg.RootRepoBranch
 	}
-	if strings.TrimSpace(rootCfg.StorageDir) == "" {
-		rootCfg.StorageDir = cfg.StorageDir
-	}
+	rootCfg.StorageDir = cfg.StorageDir
 	rootCfg.SaveMode = normalizeSaveMode(rootCfg.SaveMode)
 	return rootCfg, nil
 }
@@ -140,13 +195,18 @@ func (s *Server) writeRootSettings(cfg appsettings.Settings) error {
 }
 
 func (s *Server) syncRootSettingsToGit(r *http.Request, cfg appsettings.Settings) error {
-	b, err := json.MarshalIndent(cfg, "", "  ")
+	// Do not sync machine-local directories to git.
+	repoCfg := cfg
+	repoCfg.RootRepoLocalDir = ""
+	repoCfg.StorageDir = ""
+
+	b, err := json.MarshalIndent(repoCfg, "", "  ")
 	if err != nil {
 		return err
 	}
 	b = append(b, '\n')
 
-	if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushToken(r)); err != nil {
+	if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushAuthUsername(r), s.pushToken(r)); err != nil {
 		if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
 			return err
 		}
@@ -174,7 +234,7 @@ func (s *Server) syncRootSettingsToGit(r *http.Request, cfg appsettings.Settings
 	if err := gitops.WritePageLocal(cfg.RootRepoLocalDir, branch, s.Cfg.SpaceSettingsFile, string(b), authorName, authorEmail, nil); err != nil {
 		return err
 	}
-	return gitops.Push(cfg.RootRepoLocalDir, s.pushToken(r), branch)
+	return gitops.Push(cfg.RootRepoLocalDir, s.pushAuthUsername(r), s.pushToken(r), branch)
 }
 
 func (s *Server) syncRootSettingsIfEnabled(r *http.Request, cfg appsettings.Settings) error {
@@ -206,7 +266,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"settings": cfg,
 		"storage": map[string]string{
-			"implementation":   "local_file",
+			"implementation":   "repo_settings+local_runtime",
 			"local_settings":   s.Cfg.SettingsPath,
 			"root_settings":    s.rootSettingsPath(cfg),
 			"storage_dir":      cfg.StorageDir,
@@ -323,7 +383,7 @@ func (s *Server) createSpace(w http.ResponseWriter, r *http.Request) {
 		LocalDir:    strings.TrimSpace(body.LocalDir),
 	}
 	if entry.RepoURL == "" {
-		if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushToken(r)); err != nil {
+		if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushAuthUsername(r), s.pushToken(r)); err != nil {
 			if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -497,7 +557,7 @@ func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
 		spaceName = "Main Space"
 	}
 
-	if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.Cfg.ServerGitToken); err != nil {
+	if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, "git", s.Cfg.ServerGitToken); err != nil {
 		if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -560,12 +620,12 @@ func (s *Server) resolveSpaceRoot(r *http.Request, spaceKey string) (string, app
 			}
 			cloneDir := strings.TrimSpace(sp.LocalDir)
 			if cloneDir == "" {
-				cloneDir = filepath.Join(cfg.StorageDir, "spaces", sp.Key)
+				cloneDir = defaultCloneDirForRepo(cfg.RootRepoLocalDir, sp.RepoURL)
 			}
 			if !filepath.IsAbs(cloneDir) {
-				cloneDir = filepath.Join(cfg.StorageDir, cloneDir)
+				cloneDir = filepath.Join(repoBaseDir(cfg.RootRepoLocalDir), cloneDir)
 			}
-			if _, err := gitops.EnsureClone(cloneDir, sp.RepoURL, branch, s.pushToken(r)); err != nil {
+			if _, err := gitops.EnsureClone(cloneDir, sp.RepoURL, branch, s.pushAuthUsername(r), s.pushToken(r)); err != nil {
 				return "", appsettings.SpaceEntry{}, false, err
 			}
 			if strings.TrimSpace(sp.Path) == "" || strings.TrimSpace(sp.Path) == "." {
@@ -574,7 +634,7 @@ func (s *Server) resolveSpaceRoot(r *http.Request, spaceKey string) (string, app
 			return filepath.Join(cloneDir, filepath.FromSlash(sp.Path)), sp, true, nil
 		}
 
-		if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushToken(r)); err != nil {
+		if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushAuthUsername(r), s.pushToken(r)); err != nil {
 			if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
 				return "", appsettings.SpaceEntry{}, false, err
 			}
