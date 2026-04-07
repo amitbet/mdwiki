@@ -1,9 +1,12 @@
 package gitops
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -157,27 +160,25 @@ func WriteFileOnly(root, relPath, content string) error {
 
 // Push pushes local commits to origin when configured.
 func Push(root, authUser, token, branch string) error {
-	r, err := git.PlainOpen(root)
+	targetBranch := normalizeBranchName(branch)
+	headBefore, err := gitRevParse(root, "HEAD")
 	if err != nil {
 		return err
 	}
-	opts := &git.PushOptions{RemoteName: "origin"}
-	targetBranch := normalizeBranchName(branch)
-	opts.RefSpecs = []gitcfg.RefSpec{
-		gitcfg.RefSpec("+" + "HEAD:refs/heads/" + targetBranch),
+	if err := gitPushCLI(root, authUser, token, targetBranch); err != nil {
+		return err
 	}
-	if token != "" {
-		user := strings.TrimSpace(authUser)
-		if user == "" {
-			user = "git"
-		}
-		opts.Auth = &githttp.BasicAuth{Username: user, Password: token}
+	headAfter, err := gitLsRemoteHead(root, targetBranch)
+	if err != nil {
+		return err
 	}
-	err = r.Push(opts)
-	if errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return nil
+	if headAfter != headBefore {
+		return fmt.Errorf("push verification failed: remote refs/heads/%s at %s, expected %s", targetBranch, headAfter, headBefore)
 	}
-	return err
+	if err := gitFetchOriginBranch(root, targetBranch); err != nil {
+		return err
+	}
+	return nil
 }
 
 // WritePage writes relative path content and commits + push.
@@ -248,6 +249,9 @@ func WritePageLocal(root, branch, relPath, content, authorName, authorEmail stri
 		return err
 	}
 	if _, err := w.Add(relPath); err != nil {
+		return err
+	}
+	if err := w.AddGlob("."); err != nil {
 		return err
 	}
 	status, err := w.Status()
@@ -410,4 +414,101 @@ func EnsureSpaceMeta(root, spaceID string) error {
 // ReadFile reads a path under repo root.
 func ReadFile(root, relPath string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(root, relPath))
+}
+
+func gitPushCLI(root, authUser, token, branch string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "push", "origin", "HEAD:refs/heads/"+branch)
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
+
+	cleanup := func() {}
+	if strings.TrimSpace(token) != "" {
+		user := strings.TrimSpace(authUser)
+		if user == "" {
+			user = "git"
+		}
+		scriptPath, err := writeAskpassScript(user, token)
+		if err != nil {
+			return err
+		}
+		cleanup = func() { _ = os.Remove(scriptPath) }
+		cmd.Env = append(cmd.Env, "GIT_ASKPASS="+scriptPath)
+	}
+	defer cleanup()
+
+	var stderr bytes.Buffer
+	cmd.Stdout = nil
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return errors.New(msg)
+	}
+	return nil
+}
+
+func gitRevParse(root, rev string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", rev)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func gitLsRemoteHead(root, branch string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-remote", "origin", "refs/heads/"+branch)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("remote branch refs/heads/%s not found", branch)
+	}
+	return strings.TrimSpace(fields[0]), nil
+}
+
+func gitFetchOriginBranch(root, branch string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "fetch", "origin", branch)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return errors.New(msg)
+	}
+	return nil
+}
+
+func writeAskpassScript(user, token string) (string, error) {
+	f, err := os.CreateTemp("", "mdwiki-git-askpass-*")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%%s\\n' %q ;;\n  *) printf '%%s\\n' %q ;;\nesac\n", user, token)
+	if _, err := f.WriteString(script); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	if err := os.Chmod(f.Name(), 0o700); err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }

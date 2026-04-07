@@ -121,6 +121,7 @@ func (s *Server) Router() http.Handler {
 	r.Post("/api/spaces/{space}/rename", s.renameSpace)
 	r.Delete("/api/spaces/{space}", s.deleteSpace)
 	r.Get("/api/session", s.getSession)
+	r.Post("/api/debug/push-test", s.debugPushTest)
 
 	r.Get("/auth/github", s.githubStart)
 	r.Get("/auth/github/callback", s.githubCallback)
@@ -387,6 +388,12 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 	if body.Path == "" {
 		body.Path = "README.md"
 	}
+	normalizedPath, err := normalizeMarkdownRelPath(body.Path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	body.Path = normalizedPath
 	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -518,6 +525,56 @@ func (s *Server) pushAuthUsername(r *http.Request) string {
 		return strings.TrimSpace(sess.Login)
 	}
 	return "git"
+}
+
+func (s *Server) debugPushTest(w http.ResponseWriter, r *http.Request) {
+	spaceKey := strings.TrimSpace(r.URL.Query().Get("space"))
+	if spaceKey == "" {
+		spaceKey = "main"
+	}
+	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !ok {
+		http.Error(w, "unknown space", http.StatusNotFound)
+		return
+	}
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	branch := strings.TrimSpace(ent.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(cfg.RootRepoBranch)
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	pushUser := s.pushAuthUsername(r)
+	pushToken := s.pushToken(r)
+	pushErr := gitops.Push(root, pushUser, pushToken, branch)
+	log.Printf("debug push test: space=%s root=%s branch=%s user=%s has_token=%t err=%v", spaceKey, root, branch, pushUser, strings.TrimSpace(pushToken) != "", pushErr)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"space":      spaceKey,
+		"repo_root":  root,
+		"branch":     branch,
+		"push_user":  pushUser,
+		"has_token":  strings.TrimSpace(pushToken) != "",
+		"head":       GitHeadShort(root),
+		"push_ok":    pushErr == nil,
+		"push_error": errString(pushErr),
+	})
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (s *Server) reindexSpace(w http.ResponseWriter, r *http.Request) {

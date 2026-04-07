@@ -103,6 +103,15 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if m, ok := h.rooms[c.Room]; ok {
 				delete(m, c)
+				if len(m) == 1 {
+					for remaining := range m {
+						remaining.ReadOnly = false
+						select {
+						case remaining.TextSend <- mustMarshalControl(Control{Type: MsgSyncOK}):
+						default:
+						}
+					}
+				}
 				if len(m) == 0 {
 					delete(h.rooms, c.Room)
 				}
@@ -193,6 +202,7 @@ func (h *Hub) TryPeerStateSync(room string, joiner *Client, maxAttempts int) {
 	}
 	reqID := uuid.NewString()
 	attempted := 0
+	sentRequest := false
 	for _, peer := range peers {
 		if attempted >= maxAttempts {
 			break
@@ -206,9 +216,14 @@ func (h *Hub) TryPeerStateSync(room string, joiner *Client, maxAttempts int) {
 		if err := peer.Conn.WriteJSON(msg); err != nil {
 			continue
 		}
+		sentRequest = true
 		// Wait for state_blob would be async in production; here we rely on client responding
 		_ = reqID
 		break
+	}
+	if !sentRequest {
+		_ = joiner.Conn.WriteJSON(Control{Type: MsgSyncOK})
+		joiner.ReadOnly = false
 	}
 }
 
@@ -234,4 +249,9 @@ func HandleStateBlobPayload(joinerID string, dataB64 string) ([]byte, error) {
 // MarshalControl helper.
 func MarshalControl(c Control) ([]byte, error) {
 	return json.Marshal(c)
+}
+
+func mustMarshalControl(c Control) []byte {
+	b, _ := MarshalControl(c)
+	return b
 }

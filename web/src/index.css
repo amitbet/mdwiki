@@ -241,6 +241,11 @@ select {
   padding: 0;
 }
 
+.mode-toggle-btn.is-active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+}
+
 .brand {
   font-weight: 700;
   letter-spacing: 0.02em;
@@ -278,6 +283,21 @@ select {
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 0.82rem;
+}
+
+.mode-badge {
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.82rem;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--panel-muted);
+}
+
+.mode-badge.is-editing {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-soft);
 }
 
 .wiki-body {
@@ -399,6 +419,16 @@ select {
 .tool-btn.is-active,
 .tool-btn:hover {
   background: var(--primary-soft);
+}
+
+.tool-btn:disabled,
+.tool-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.tool-btn:disabled:hover {
+  background: var(--panel);
 }
 
 .wysiwyg-editor {

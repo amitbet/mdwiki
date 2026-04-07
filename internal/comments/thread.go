@@ -64,17 +64,21 @@ func WriteThread(spaceRoot, pageKey, threadID, anchorID string, tf ThreadFile) e
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tf.SchemaVersion = 1
-	if tf.ThreadID == "" {
-		tf.ThreadID = uuid.NewString()
-	}
-	tf.AnchorID = anchorID
-	b, err := json.MarshalIndent(tf, "", "  ")
+	b, err := MarshalThread(threadID, anchorID, tf)
 	if err != nil {
 		return err
 	}
 	p := filepath.Join(dir, threadID+".json")
 	return os.WriteFile(p, b, 0o644)
+}
+
+func MarshalThread(threadID, anchorID string, tf ThreadFile) ([]byte, error) {
+	tf.SchemaVersion = 1
+	if tf.ThreadID == "" {
+		tf.ThreadID = uuid.NewString()
+	}
+	tf.AnchorID = anchorID
+	return json.MarshalIndent(tf, "", "  ")
 }
 
 // DeleteThread removes a thread file (resolve).

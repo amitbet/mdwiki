@@ -347,15 +347,23 @@ function IconButton({
   title,
   onClick,
   active,
+  disabled,
   children,
 }: {
   title: string;
   onClick: () => void;
   active?: boolean;
+  disabled?: boolean;
   children: ReactNode;
 }) {
   return (
-    <button type="button" className={active ? "tool-btn is-active" : "tool-btn"} onClick={onClick} title={title}>
+    <button
+      type="button"
+      className={active ? "tool-btn is-active" : "tool-btn"}
+      onClick={onClick}
+      title={title}
+      disabled={disabled}
+    >
       {children}
     </button>
   );
@@ -412,6 +420,7 @@ export default function WikiEditor({
   const [markdown, setMarkdown] = useState(DEFAULT_PAGE_TEXT);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lastErrorDetails, setLastErrorDetails] = useState<string>("");
   const [errorDetailsOpen, setErrorDetailsOpen] = useState(false);
@@ -442,10 +451,13 @@ export default function WikiEditor({
   const popoverHoverRef = useRef(false);
   const lastSavedMarkdownRef = useRef("");
   const applyingRemoteSyncRef = useRef(false);
+  const suppressDirtyTrackingRef = useRef(false);
+  const dirtyTrackingResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsReconnectAttemptsRef = useRef(0);
   const dirtyRef = useRef(false);
   const [wsReconnectTick, setWsReconnectTick] = useState(0);
+  const canEdit = isEditing && !readOnly;
 
   const ydoc = useMemo(() => new Y.Doc(), [space, path]);
   const CommentHighlight = useMemo(
@@ -503,13 +515,13 @@ export default function WikiEditor({
       onUpdate({ editor: ed }) {
         const next = htmlToMarkdown(ed.getHTML());
         setMarkdown(next);
-        if (applyingRemoteSyncRef.current) {
+        if (applyingRemoteSyncRef.current || suppressDirtyTrackingRef.current || !isEditing) {
           return;
         }
         setDirty(canonicalMarkdown(next) !== canonicalMarkdown(lastSavedMarkdownRef.current));
       },
     },
-    [CommentHighlight, ydoc],
+    [CommentHighlight, isEditing, ydoc],
   );
 
   const commitCurrentState = useCallback(async () => {
@@ -594,12 +606,38 @@ export default function WikiEditor({
     [confirmLeaveDirtyPage, onSpaceChange, space],
   );
 
+  const suppressDirtyTrackingForTick = useCallback(() => {
+    suppressDirtyTrackingRef.current = true;
+    if (dirtyTrackingResumeTimerRef.current) {
+      window.clearTimeout(dirtyTrackingResumeTimerRef.current);
+    }
+    dirtyTrackingResumeTimerRef.current = window.setTimeout(() => {
+      suppressDirtyTrackingRef.current = false;
+      dirtyTrackingResumeTimerRef.current = null;
+    }, 0);
+  }, []);
+
   useEffect(() => {
     if (!editor) {
       return;
     }
-    editor.setEditable(!readOnly);
-  }, [editor, readOnly]);
+    editor.setEditable(canEdit);
+  }, [canEdit, editor]);
+
+  const applyTrustedMarkdown = useCallback(
+    async (md: string) => {
+      if (!editor) {
+        return;
+      }
+      const html = await renderGFM(md);
+      suppressDirtyTrackingForTick();
+      lastSavedMarkdownRef.current = canonicalMarkdown(md);
+      setMarkdown(md);
+      setDirty(false);
+      editor.commands.setContent(html, { emitUpdate: true });
+    },
+    [editor, suppressDirtyTrackingForTick],
+  );
 
   const loadTree = useCallback(async (): Promise<PageTreeNode[]> => {
     try {
@@ -664,12 +702,8 @@ export default function WikiEditor({
     }
     const j = (await r.json()) as { content?: string };
     const md = typeof j.content === "string" ? j.content : DEFAULT_PAGE_TEXT;
-    const html = await renderGFM(md);
-    editor.commands.setContent(html, { emitUpdate: true });
-    setMarkdown(md);
-    lastSavedMarkdownRef.current = canonicalMarkdown(md);
-    setDirty(false);
-  }, [editor, path, space, ydoc]);
+    await applyTrustedMarkdown(md);
+  }, [applyTrustedMarkdown, editor, path, space, ydoc]);
 
   useEffect(() => {
     void loadTree();
@@ -714,10 +748,24 @@ export default function WikiEditor({
     let bootHandled = false;
     let fallbackBooted = false;
     let reconnectScheduled = false;
+    let awaitingPeerSync = false;
+    let httpSeededWhileAwaitingPeerSync = false;
     const shouldSeedFromHttp = () => ydoc.getXmlFragment("content").length === 0;
-    const seedFromHttpIfEmpty = () => {
+    const clearSharedContent = () => {
+      const fragment = ydoc.getXmlFragment("content");
+      if (fragment.length === 0) {
+        return;
+      }
+      ydoc.transact(() => {
+        fragment.delete(0, fragment.length);
+      }, "remote");
+    };
+    const seedFromHttpIfEmpty = (options?: { awaitingPeerSyncFallback?: boolean }) => {
       if (cancelled || !shouldSeedFromHttp()) {
         return;
+      }
+      if (options?.awaitingPeerSyncFallback) {
+        httpSeededWhileAwaitingPeerSync = true;
       }
       void seedFromHttp();
     };
@@ -765,11 +813,17 @@ export default function WikiEditor({
 
     ws.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) {
+        if (awaitingPeerSync && httpSeededWhileAwaitingPeerSync) {
+          clearSharedContent();
+          httpSeededWhileAwaitingPeerSync = false;
+        }
+        awaitingPeerSync = false;
+        suppressDirtyTrackingForTick();
         applyingRemoteSyncRef.current = true;
         Y.applyUpdate(ydoc, new Uint8Array(ev.data), "remote");
-        queueMicrotask(() => {
+        window.setTimeout(() => {
           applyingRemoteSyncRef.current = false;
-        });
+        }, 0);
         return;
       }
 
@@ -784,6 +838,10 @@ export default function WikiEditor({
         void sendStateBlob(ctrl.for_client);
         return;
       }
+      if (ctrl.type === "need_sync") {
+        awaitingPeerSync = true;
+        return;
+      }
       if (ctrl.type === "pages_invalidated") {
         void loadTree();
         return;
@@ -793,15 +851,17 @@ export default function WikiEditor({
         if (ctrl.type === "sync_ok") {
           bootHandled = true;
           fallbackBooted = true;
+          awaitingPeerSync = false;
           seedFromHttpIfEmpty();
         } else if (ctrl.type === "sync_lock") {
           bootHandled = true;
           fallbackBooted = true;
+          awaitingPeerSync = true;
           setTimeout(() => {
             if (cancelled || ydoc.getXmlFragment("content").length > 0) {
               return;
             }
-            seedFromHttpIfEmpty();
+            seedFromHttpIfEmpty({ awaitingPeerSyncFallback: true });
           }, 8000);
         }
       }
@@ -810,6 +870,8 @@ export default function WikiEditor({
         setReadOnly(true);
         setSyncMsg(ctrl.reason ?? "locked until peer sync");
       } else if (ctrl.type === "sync_ok") {
+        awaitingPeerSync = false;
+        httpSeededWhileAwaitingPeerSync = false;
         setReadOnly(false);
         setSyncMsg("");
       }
@@ -862,7 +924,7 @@ export default function WikiEditor({
     };
 
     const fallbackTimer = window.setTimeout(() => {
-      if (!bootHandled && !fallbackBooted) {
+      if (!bootHandled && !fallbackBooted && !awaitingPeerSync) {
         fallbackBooted = true;
         seedFromHttpIfEmpty();
       }
@@ -875,10 +937,14 @@ export default function WikiEditor({
         window.clearTimeout(wsReconnectTimerRef.current);
         wsReconnectTimerRef.current = null;
       }
+      if (dirtyTrackingResumeTimerRef.current) {
+        window.clearTimeout(dirtyTrackingResumeTimerRef.current);
+        dirtyTrackingResumeTimerRef.current = null;
+      }
       ydoc.off("update", updateHandler);
       ws.close();
     };
-  }, [editor, loadComments, loadTree, path, seedFromHttp, space, wsReconnectTick, ydoc]);
+  }, [editor, loadComments, loadTree, path, seedFromHttp, space, suppressDirtyTrackingForTick, wsReconnectTick, ydoc]);
 
   const save = useCallback(async () => {
     if (!dirty) {
@@ -915,11 +981,12 @@ export default function WikiEditor({
 
   useEffect(() => {
     setDirty(false);
+    setIsEditing(false);
     lastSavedMarkdownRef.current = "";
   }, [space, path]);
 
   useEffect(() => {
-    if (readOnly) {
+    if (!canEdit) {
       return;
     }
     const id = window.setInterval(() => {
@@ -931,7 +998,28 @@ export default function WikiEditor({
     return () => {
       window.clearInterval(id);
     };
-  }, [consecutiveSaveFailures, dirty, readOnly, save, saving]);
+  }, [canEdit, consecutiveSaveFailures, dirty, save, saving]);
+
+  const toggleEditing = useCallback(async () => {
+    if (isEditing) {
+      if (dirtyRef.current) {
+        if (saving) {
+          return;
+        }
+        if (consecutiveSaveFailures < 3) {
+          await save();
+          if (dirtyRef.current) {
+            return;
+          }
+        } else if (!window.confirm("You have unsaved changes on this page. Leave edit mode anyway?")) {
+          return;
+        }
+      }
+      setIsEditing(false);
+      return;
+    }
+    setIsEditing(true);
+  }, [consecutiveSaveFailures, isEditing, save, saving]);
 
   const selectedSpace = useMemo(() => spaces.find((s) => s.key === space) ?? null, [space, spaces]);
   const isSpaceCreator = useMemo(() => {
@@ -1062,8 +1150,7 @@ export default function WikiEditor({
         onPathChange(j.path);
       }
       if (typeof j.content === "string") {
-        const html = await renderGFM(j.content);
-        editor?.commands.setContent(html, { emitUpdate: true });
+        await applyTrustedMarkdown(j.content);
       }
       setCreatePageOpen(false);
       await loadTree();
@@ -1546,7 +1633,23 @@ export default function WikiEditor({
           {pageTitle(path)}
         </button>
         <div className="spacer" />
+        <span className={`mode-badge ${isEditing ? "is-editing" : "is-viewing"}`}>{isEditing ? "Editing" : "Viewing"}</span>
         {readOnly ? <span className="sync-badge">Read-only: {syncMsg}</span> : null}
+        <button
+          type="button"
+          className={`top-icon-btn mode-toggle-btn ${isEditing ? "is-active" : ""}`}
+          title={isEditing ? "Stop editing" : "Edit page"}
+          aria-label={isEditing ? "Stop editing" : "Edit page"}
+          onClick={toggleEditing}
+          disabled={readOnly}
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path
+              d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25Zm14.71-9.04a1.003 1.003 0 0 0 0-1.42l-2.5-2.5a1.003 1.003 0 0 0-1.42 0l-1.17 1.17 3.75 3.75 1.34-1Z"
+              fill="currentColor"
+            />
+          </svg>
+        </button>
         <button type="button" className="top-icon-btn" title="Settings" onClick={() => setSettingsOpen(true)}>
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
             <path
@@ -1633,13 +1736,14 @@ export default function WikiEditor({
               value={headingValue}
               onChange={(e) => applyHeading(e.target.value)}
               title="Headings"
+              disabled={!canEdit}
             >
               <option value="paragraph">Paragraph</option>
               <option value="h1">Heading 1</option>
               <option value="h2">Heading 2</option>
               <option value="h3">Heading 3</option>
             </select>
-            <select className="tool-select" value={formatValue} onChange={(e) => applyFormat(e.target.value)} title="Formats">
+            <select className="tool-select" value={formatValue} onChange={(e) => applyFormat(e.target.value)} title="Formats" disabled={!canEdit}>
               <option value="normal">Normal</option>
               <option value="bullet">Bullet list</option>
               <option value="ordered">Numbered list</option>
@@ -1648,23 +1752,24 @@ export default function WikiEditor({
               <option value="inlinecode">Inline code</option>
             </select>
 
-            <IconButton title="Bold" active={!!editor?.isActive("bold")} onClick={() => editor?.chain().focus().toggleBold().run()}>
+            <IconButton title="Bold" active={!!editor?.isActive("bold")} onClick={() => editor?.chain().focus().toggleBold().run()} disabled={!canEdit}>
               <FormatBoldIcon fontSize="small" />
             </IconButton>
-            <IconButton title="Italic" active={!!editor?.isActive("italic")} onClick={() => editor?.chain().focus().toggleItalic().run()}>
+            <IconButton title="Italic" active={!!editor?.isActive("italic")} onClick={() => editor?.chain().focus().toggleItalic().run()} disabled={!canEdit}>
               <FormatItalicIcon fontSize="small" />
             </IconButton>
             <IconButton
               title="Underline"
               active={!!editor?.isActive("underline")}
               onClick={() => editor?.chain().focus().toggleUnderline().run()}
+              disabled={!canEdit}
             >
               <FormatUnderlinedIcon fontSize="small" />
             </IconButton>
-            <IconButton title="Strike" active={!!editor?.isActive("strike")} onClick={() => editor?.chain().focus().toggleStrike().run()}>
+            <IconButton title="Strike" active={!!editor?.isActive("strike")} onClick={() => editor?.chain().focus().toggleStrike().run()} disabled={!canEdit}>
               <StrikethroughSIcon fontSize="small" />
             </IconButton>
-            <IconButton title="Link" active={!!editor?.isActive("link")} onClick={insertLink}>
+            <IconButton title="Link" active={!!editor?.isActive("link")} onClick={insertLink} disabled={!canEdit}>
               <InsertLinkIcon fontSize="small" />
             </IconButton>
           </div>
@@ -1709,7 +1814,7 @@ export default function WikiEditor({
               scheduleHidePopover();
             }}
             onContextMenu={(e) => {
-              if (!editor) {
+              if (!editor || !canEdit) {
                 return;
               }
               e.preventDefault();
@@ -1731,8 +1836,9 @@ export default function WikiEditor({
                 <span className="code-lang-label">Language</span>
                 <select
                   value={codeLangHover.language || "plaintext"}
+                  disabled={!canEdit}
                   onChange={(e) => {
-                    if (!editor || !codeLangHover) {
+                    if (!editor || !codeLangHover || !canEdit) {
                       return;
                     }
                     const lang = e.target.value;

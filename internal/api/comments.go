@@ -12,6 +12,7 @@ import (
 
 	"mdwiki/internal/comments"
 	"mdwiki/internal/gitops"
+	"mdwiki/internal/session"
 )
 
 type addCommentBody struct {
@@ -61,6 +62,61 @@ func actorFromRequest(s *Server, r *http.Request) string {
 		return "local"
 	}
 	return strings.TrimSpace(sess.Login)
+}
+
+func authorFromRequest(s *Server, r *http.Request) (string, string) {
+	authorName := "mdwiki"
+	authorEmail := "local@mdwiki"
+	sid := sessionFromCookie(r)
+	if sid == "" {
+		return authorName, authorEmail
+	}
+	sess, ok := s.Sessions.Get(sid)
+	if !ok {
+		return authorName, authorEmail
+	}
+	if strings.TrimSpace(sess.Name) != "" {
+		authorName = sess.Name
+	} else if strings.TrimSpace(sess.Login) != "" {
+		authorName = sess.Login
+	}
+	if strings.TrimSpace(sess.Login) != "" {
+		authorEmail = sess.Login + "@users.noreply.github.com"
+	}
+	return authorName, authorEmail
+}
+
+func (s *Server) writeCommentThread(r *http.Request, root, branch, pageKey, threadID, anchorID string, tf comments.ThreadFile) error {
+	b, err := comments.MarshalThread(threadID, anchorID, tf)
+	if err != nil {
+		return err
+	}
+	relPath := filepath.ToSlash(filepath.Join(".mdwiki", "comments", pageKey, threadID+".json"))
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		return err
+	}
+	if normalizeSaveMode(cfg.SaveMode) == "local" {
+		return gitops.WriteFileOnly(root, relPath, string(b))
+	}
+	repoRoot, repoRelPath, err := resolveRepoPath(root, relPath)
+	if err != nil {
+		return err
+	}
+	authorName, authorEmail := authorFromRequest(s, r)
+	_, err = s.executeGitWrite(r.Context(), gitWriteJob{
+		ID:          session.NewID(),
+		Op:          "save",
+		RepoRoot:    repoRoot,
+		Branch:      branch,
+		Path:        repoRelPath,
+		Content:     string(b),
+		AuthorName:  authorName,
+		AuthorEmail: authorEmail,
+		PushUser:    s.pushAuthUsername(r),
+		PushToken:   s.pushToken(r),
+	})
+	return err
 }
 
 func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +192,7 @@ func (s *Server) listComments(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) addComment(w http.ResponseWriter, r *http.Request) {
 	spaceKey := chi.URLParam(r, "space")
-	root, _, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -169,7 +225,19 @@ func (s *Server) addComment(w http.ResponseWriter, r *http.Request) {
 		Status:   "open",
 		Messages: []comments.MessageEntry{msg},
 	}
-	if err := comments.WriteThread(root, pageKey, threadID, body.AnchorID, tf); err != nil {
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	branch := strings.TrimSpace(ent.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(cfg.RootRepoBranch)
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	if err := s.writeCommentThread(r, root, branch, pageKey, threadID, body.AnchorID, tf); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -191,7 +259,7 @@ func (s *Server) replyComment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "thread is required", http.StatusBadRequest)
 		return
 	}
-	root, _, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -236,7 +304,19 @@ func (s *Server) replyComment(w http.ResponseWriter, r *http.Request) {
 		msg.InReplyTo = &replyTo
 	}
 	tf.Messages = append(tf.Messages, msg)
-	if err := comments.WriteThread(root, pageKey, threadID, tf.AnchorID, tf); err != nil {
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	branch := strings.TrimSpace(ent.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(cfg.RootRepoBranch)
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	if err := s.writeCommentThread(r, root, branch, pageKey, threadID, tf.AnchorID, tf); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -250,7 +330,7 @@ func (s *Server) editComment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "thread is required", http.StatusBadRequest)
 		return
 	}
-	root, _, ok, err := s.resolveSpaceRoot(r, spaceKey)
+	root, ent, ok, err := s.resolveSpaceRoot(r, spaceKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -313,7 +393,19 @@ func (s *Server) editComment(w http.ResponseWriter, r *http.Request) {
 	msg.Replaces = &replaces
 	msg.InReplyTo = target.InReplyTo
 	tf.Messages = append(tf.Messages, msg)
-	if err := comments.WriteThread(root, pageKey, threadID, tf.AnchorID, tf); err != nil {
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	branch := strings.TrimSpace(ent.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(cfg.RootRepoBranch)
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	if err := s.writeCommentThread(r, root, branch, pageKey, threadID, tf.AnchorID, tf); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

@@ -166,6 +166,7 @@ func runGitWriteJob(job gitWriteJob) gitWriteResult {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
 		pushErr := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch)
+		log.Printf("git save push: root=%s branch=%s path=%s user=%s has_token=%t err=%v", job.RepoRoot, job.Branch, job.Path, job.PushUser, strings.TrimSpace(job.PushToken) != "", pushErr)
 		msg := "Committed and pushed"
 		if pushErr != nil {
 			msg = "Committed locally; push failed: " + pushErr.Error()
@@ -182,8 +183,10 @@ func runGitWriteJob(job gitWriteJob) gitWriteResult {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
 		if err := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch); err != nil {
+			log.Printf("git rename push: root=%s branch=%s from=%s to=%s user=%s has_token=%t err=%v", job.RepoRoot, job.Branch, job.FromPath, job.ToPath, job.PushUser, strings.TrimSpace(job.PushToken) != "", err)
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
+		log.Printf("git rename push: root=%s branch=%s from=%s to=%s user=%s has_token=%t err=<nil>", job.RepoRoot, job.Branch, job.FromPath, job.ToPath, job.PushUser, strings.TrimSpace(job.PushToken) != "")
 		return gitWriteResult{OK: true, Path: job.ToPath, Message: "Committed and pushed"}
 
 	case "delete":
@@ -191,8 +194,10 @@ func runGitWriteJob(job gitWriteJob) gitWriteResult {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
 		if err := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch); err != nil {
+			log.Printf("git delete push: root=%s branch=%s path=%s user=%s has_token=%t err=%v", job.RepoRoot, job.Branch, job.Path, job.PushUser, strings.TrimSpace(job.PushToken) != "", err)
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
+		log.Printf("git delete push: root=%s branch=%s path=%s user=%s has_token=%t err=<nil>", job.RepoRoot, job.Branch, job.Path, job.PushUser, strings.TrimSpace(job.PushToken) != "")
 		return gitWriteResult{OK: true, Path: job.Path, Message: "Committed and pushed"}
 	}
 	return gitWriteResult{OK: false, Error: fmt.Sprintf("unknown git job op: %s", job.Op)}
