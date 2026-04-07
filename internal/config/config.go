@@ -11,6 +11,11 @@ type Config struct {
 	DataDir           string
 	RegistryPath      string // spaces-registry.yaml
 	SettingsPath      string // local JSON storage for root repo + spaces
+	RootRepoURL       string // default root git repo URL
+	RootRepoBranch    string
+	RootRepoLocalDir  string // local clone directory for root repo
+	StorageDir        string // local storage root for server data
+	SpaceSettingsFile string // settings JSON name in root repo
 	GitHubClientID    string
 	GitHubSecret      string
 	GitHubCallbackURL string
@@ -26,6 +31,11 @@ func FromEnv() Config {
 		DataDir:           get("MDWIKI_DATA", "./data"),
 		RegistryPath:      get("MDWIKI_REGISTRY", "./spaces-registry.yaml"),
 		SettingsPath:      get("MDWIKI_SETTINGS_PATH", "./data/settings.json"),
+		RootRepoURL:       get("MDWIKI_ROOT_GIT_REPO", "https://github.com/amitbet/documents"),
+		RootRepoBranch:    get("MDWIKI_ROOT_GIT_BRANCH", "main"),
+		RootRepoLocalDir:  get("MDWIKI_ROOT_LOCAL_DIR", "./data/root-git-repo"),
+		StorageDir:        get("MDWIKI_STORAGE_DIR", "./data/storage"),
+		SpaceSettingsFile: get("MDWIKI_SPACE_SETTINGS_FILE", "mdwiki.spaces.json"),
 		GitHubClientID:    os.Getenv("MDWIKI_GITHUB_CLIENT_ID"),
 		GitHubSecret:      os.Getenv("MDWIKI_GITHUB_CLIENT_SECRET"),
 		GitHubCallbackURL: get("MDWIKI_GITHUB_CALLBACK", "http://localhost:8080/auth/github/callback"),

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -12,12 +13,13 @@ import (
 
 // MsgType control messages (JSON text frames).
 const (
-	MsgYjsUpdate      = "yjs"           // binary frame, not JSON
-	MsgRequestState   = "request_state" // server asks peer to supply full state
-	MsgStateBlob      = "state_blob"    // peer -> server -> joiner
-	MsgNeedSync       = "need_sync"     // joiner announces need full sync
-	MsgSyncFailedLock = "sync_lock"     // server: read-only until peer sync
-	MsgSyncOK         = "sync_ok"       // server: editing allowed
+	MsgYjsUpdate        = "yjs"               // binary frame, not JSON
+	MsgRequestState     = "request_state"     // server asks peer to supply full state
+	MsgStateBlob        = "state_blob"        // peer -> server -> joiner
+	MsgNeedSync         = "need_sync"         // joiner announces need full sync
+	MsgSyncFailedLock   = "sync_lock"         // server: read-only until peer sync
+	MsgSyncOK           = "sync_ok"           // server: editing allowed
+	MsgPagesInvalidated = "pages_invalidated" // page tree changed in this space
 )
 
 // Control JSON message.
@@ -36,6 +38,7 @@ type Client struct {
 	Room     string
 	Conn     *websocket.Conn
 	Send     chan []byte
+	TextSend chan []byte
 	Hub      *Hub
 	UserID   string // optional session id for contributor tracking
 	ReadOnly bool
@@ -52,9 +55,9 @@ type Hub struct {
 }
 
 type broadcastMsg struct {
-	room    string
-	data    []byte
-	skip    *Client
+	room     string
+	data     []byte
+	skip     *Client
 	isBinary bool
 }
 
@@ -106,6 +109,7 @@ func (h *Hub) Run() {
 			}
 			h.mu.Unlock()
 			close(c.Send)
+			close(c.TextSend)
 
 		case b := <-h.broadcast:
 			h.mu.RLock()
@@ -115,7 +119,12 @@ func (h *Hub) Run() {
 					continue
 				}
 				select {
-				case cl.Send <- b.data:
+				case func() chan []byte {
+					if b.isBinary {
+						return cl.Send
+					}
+					return cl.TextSend
+				}() <- b.data:
 				default:
 				}
 			}
@@ -140,6 +149,31 @@ func (h *Hub) Unregister(c *Client) {
 // BroadcastYjs sends binary update to all in room except skip.
 func (h *Hub) BroadcastYjs(room string, data []byte, skip *Client) {
 	h.broadcast <- broadcastMsg{room: room, data: data, skip: skip, isBinary: true}
+}
+
+// BroadcastControlToSpace sends JSON control message to all clients connected to any page in a space.
+func (h *Hub) BroadcastControlToSpace(spaceKey string, ctrl Control) {
+	data, err := MarshalControl(ctrl)
+	if err != nil {
+		return
+	}
+	prefix := strings.TrimSpace(spaceKey) + ":"
+	if prefix == ":" {
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for room, clients := range h.rooms {
+		if !strings.HasPrefix(room, prefix) {
+			continue
+		}
+		for cl := range clients {
+			select {
+			case cl.TextSend <- data:
+			default:
+			}
+		}
+	}
 }
 
 // TryPeerStateSync picks another client in room and asks for state blob for target.

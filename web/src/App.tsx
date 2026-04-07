@@ -14,7 +14,14 @@ type DeviceFlowState = {
 
 type SetupStatus = {
   configured: boolean;
+  settings?: {
+    root_repo_url?: string;
+    root_repo_local_dir?: string;
+    storage_dir?: string;
+  };
 };
+
+type ThemeMode = "light" | "dark";
 
 function readLS(key: string, fallback: string): string {
   try {
@@ -86,8 +93,15 @@ function LoginScreen({
   );
 }
 
-function SetupScreen({ onConfigured }: { onConfigured: () => void }) {
-  const [rootRepoPath, setRootRepoPath] = useState("./data/root-repo");
+function SetupScreen({
+  initialSettings,
+  onConfigured,
+}: {
+  initialSettings?: SetupStatus["settings"];
+  onConfigured: () => void;
+}) {
+  const [rootRepoLocalDir, setRootRepoLocalDir] = useState(initialSettings?.root_repo_local_dir ?? "./data/root-git-repo");
+  const [storageDir, setStorageDir] = useState(initialSettings?.storage_dir ?? "./data/storage");
   const [spaceKey, setSpaceKey] = useState("main");
   const [spaceName, setSpaceName] = useState("Main Space");
   const [busy, setBusy] = useState(false);
@@ -102,7 +116,8 @@ function SetupScreen({ onConfigured }: { onConfigured: () => void }) {
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          root_repo_path: rootRepoPath,
+          root_repo_local_dir: rootRepoLocalDir,
+          storage_dir: storageDir,
           first_space_key: spaceKey,
           first_space_name: spaceName,
         }),
@@ -122,14 +137,23 @@ function SetupScreen({ onConfigured }: { onConfigured: () => void }) {
     <div className="setup-shell">
       <div className="setup-card">
         <h1>Initial setup</h1>
-        <p>Connect a root repo to store wiki settings and your first space.</p>
+        <p>Configure local paths and your first space. Root repo URL comes from server env.</p>
 
         <label>
-          Root repo path
+          Root repo local directory
           <input
-            value={rootRepoPath}
-            onChange={(e) => setRootRepoPath(e.target.value)}
-            placeholder="/absolute/path/to/root-repo"
+            value={rootRepoLocalDir}
+            onChange={(e) => setRootRepoLocalDir(e.target.value)}
+            placeholder="./data/root-git-repo"
+          />
+        </label>
+
+        <label>
+          Storage directory
+          <input
+            value={storageDir}
+            onChange={(e) => setStorageDir(e.target.value)}
+            placeholder="./data/storage"
           />
         </label>
 
@@ -161,7 +185,24 @@ export default function App() {
   const [deviceFlow, setDeviceFlow] = useState<DeviceFlowState | null>(null);
   const [deviceError, setDeviceError] = useState<string | null>(null);
   const [deviceBusy, setDeviceBusy] = useState(false);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    try {
+      const saved = localStorage.getItem("mdwiki.theme");
+      return saved === "dark" ? "dark" : "light";
+    } catch {
+      return "light";
+    }
+  });
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("mdwiki.theme", theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
 
   const loadSession = useCallback(async () => {
     const r = await fetch("/api/session", { credentials: "include" });
@@ -204,6 +245,38 @@ export default function App() {
       return;
     }
     void loadSpaces();
+  }, [loadSpaces, session, setup]);
+
+  useEffect(() => {
+    if (!session || !setup?.configured) {
+      return;
+    }
+    let stopped = false;
+    const tick = async () => {
+      if (stopped || document.hidden) {
+        return;
+      }
+      await loadSpaces();
+    };
+    const id = window.setInterval(() => {
+      void tick();
+    }, 5000);
+    const onFocus = () => {
+      void loadSpaces();
+    };
+    const onVisibility = () => {
+      if (!document.hidden) {
+        void loadSpaces();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [loadSpaces, session, setup]);
 
   useEffect(() => {
@@ -338,7 +411,7 @@ export default function App() {
   }
 
   if (!setup.configured) {
-    return <SetupScreen onConfigured={() => void loadSetup()} />;
+    return <SetupScreen initialSettings={setup.settings} onConfigured={() => void loadSetup()} />;
   }
 
   if (spaces === null) {
@@ -353,8 +426,12 @@ export default function App() {
         setSpace(k);
         setPath("README.md");
       }}
+      onSpacesChanged={loadSpaces}
+      currentUserLogin={session.login}
       path={path}
       onPathChange={setPath}
+      theme={theme}
+      onToggleTheme={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
     />
   );
 }

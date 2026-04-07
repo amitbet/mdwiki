@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+
 	"mdwiki/internal/appsettings"
 	"mdwiki/internal/gitops"
 )
@@ -16,22 +19,443 @@ import (
 var keyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]*$`)
 
 type setupRequest struct {
-	RootRepoPath   string `json:"root_repo_path"`
+	RootLocalDir   string `json:"root_repo_local_dir"`
+	StorageDir     string `json:"storage_dir"`
 	FirstSpaceKey  string `json:"first_space_key"`
 	FirstSpaceName string `json:"first_space_name"`
 }
 
+func absOr(value, fallback string) (string, error) {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		v = fallback
+	}
+	return filepath.Abs(v)
+}
+
+func (s *Server) defaultSettings() (appsettings.Settings, error) {
+	rootLocal, err := absOr(s.Cfg.RootRepoLocalDir, "./data/root-git-repo")
+	if err != nil {
+		return appsettings.Settings{}, err
+	}
+	storageDir, err := absOr(s.Cfg.StorageDir, "./data/storage")
+	if err != nil {
+		return appsettings.Settings{}, err
+	}
+	return appsettings.Settings{
+		RootRepoURL:      strings.TrimSpace(s.Cfg.RootRepoURL),
+		RootRepoBranch:   strings.TrimSpace(s.Cfg.RootRepoBranch),
+		RootRepoLocalDir: rootLocal,
+		StorageDir:       storageDir,
+		SaveMode:         "git_sync",
+		Spaces:           []appsettings.SpaceEntry{},
+	}, nil
+}
+
+func normalizeSaveMode(mode string) string {
+	m := strings.TrimSpace(strings.ToLower(mode))
+	switch m {
+	case "local", "git_sync":
+		return m
+	default:
+		return "git_sync"
+	}
+}
+
+func (s *Server) rootSettingsPath(cfg appsettings.Settings) string {
+	return filepath.Join(cfg.RootRepoLocalDir, s.Cfg.SpaceSettingsFile)
+}
+
+func (s *Server) loadSettings(ctx context.Context) (appsettings.Settings, error) {
+	cfg, err := s.Store.Load(ctx)
+	if err != nil {
+		return appsettings.Settings{}, err
+	}
+	def, err := s.defaultSettings()
+	if err != nil {
+		return appsettings.Settings{}, err
+	}
+	// Root repository URL is bootstrap-only and always comes from env.
+	cfg.RootRepoURL = def.RootRepoURL
+	if strings.TrimSpace(cfg.RootRepoBranch) == "" {
+		cfg.RootRepoBranch = def.RootRepoBranch
+	}
+	if strings.TrimSpace(cfg.RootRepoLocalDir) == "" {
+		cfg.RootRepoLocalDir = def.RootRepoLocalDir
+	}
+	if strings.TrimSpace(cfg.StorageDir) == "" {
+		cfg.StorageDir = def.StorageDir
+	}
+	cfg.SaveMode = normalizeSaveMode(cfg.SaveMode)
+
+	p := s.rootSettingsPath(cfg)
+	b, err := os.ReadFile(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cfg, nil
+		}
+		return appsettings.Settings{}, err
+	}
+	if len(b) == 0 {
+		return cfg, nil
+	}
+	var rootCfg appsettings.Settings
+	if err := json.Unmarshal(b, &rootCfg); err != nil {
+		return appsettings.Settings{}, err
+	}
+	if strings.TrimSpace(rootCfg.RootRepoLocalDir) == "" {
+		rootCfg.RootRepoLocalDir = cfg.RootRepoLocalDir
+	}
+	// Never allow persisted root settings to override env root repo URL.
+	rootCfg.RootRepoURL = def.RootRepoURL
+	if strings.TrimSpace(rootCfg.RootRepoBranch) == "" {
+		rootCfg.RootRepoBranch = cfg.RootRepoBranch
+	}
+	if strings.TrimSpace(rootCfg.StorageDir) == "" {
+		rootCfg.StorageDir = cfg.StorageDir
+	}
+	rootCfg.SaveMode = normalizeSaveMode(rootCfg.SaveMode)
+	return rootCfg, nil
+}
+
+func (s *Server) saveSettings(ctx context.Context, cfg appsettings.Settings) error {
+	// Enforce env-configured root repo URL at persistence boundaries.
+	cfg.RootRepoURL = strings.TrimSpace(s.Cfg.RootRepoURL)
+	if err := s.Store.Save(ctx, cfg); err != nil {
+		return err
+	}
+	return s.writeRootSettings(cfg)
+}
+
+func (s *Server) writeRootSettings(cfg appsettings.Settings) error {
+	if err := os.MkdirAll(cfg.RootRepoLocalDir, 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	return os.WriteFile(s.rootSettingsPath(cfg), b, 0o644)
+}
+
+func (s *Server) syncRootSettingsToGit(r *http.Request, cfg appsettings.Settings) error {
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+
+	if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushToken(r)); err != nil {
+		if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
+			return err
+		}
+	}
+
+	authorName := "mdwiki"
+	authorEmail := "local@mdwiki"
+	if sid := sessionFromCookie(r); sid != "" {
+		if sess, ok := s.Sessions.Get(sid); ok {
+			if strings.TrimSpace(sess.Name) != "" {
+				authorName = sess.Name
+			} else if strings.TrimSpace(sess.Login) != "" {
+				authorName = sess.Login
+			}
+			if strings.TrimSpace(sess.Login) != "" {
+				authorEmail = sess.Login + "@users.noreply.github.com"
+			}
+		}
+	}
+
+	branch := strings.TrimSpace(cfg.RootRepoBranch)
+	if branch == "" {
+		branch = "main"
+	}
+	if err := gitops.WritePageLocal(cfg.RootRepoLocalDir, branch, s.Cfg.SpaceSettingsFile, string(b), authorName, authorEmail, nil); err != nil {
+		return err
+	}
+	return gitops.Push(cfg.RootRepoLocalDir, s.pushToken(r), branch)
+}
+
+func (s *Server) syncRootSettingsIfEnabled(r *http.Request, cfg appsettings.Settings) error {
+	if normalizeSaveMode(cfg.SaveMode) != "git_sync" {
+		return nil
+	}
+	return s.syncRootSettingsToGit(r, cfg)
+}
+
 func (s *Server) getSetupStatus(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.Store.Load(r.Context())
+	cfg, err := s.loadSettings(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	configured := cfg.RootRepoPath != "" && len(cfg.Spaces) > 0
+	configured := strings.TrimSpace(cfg.RootRepoURL) != "" && len(cfg.Spaces) > 0
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"configured": configured,
 		"settings":   cfg,
 	})
+}
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"settings": cfg,
+		"storage": map[string]string{
+			"implementation":   "local_file",
+			"local_settings":   s.Cfg.SettingsPath,
+			"root_settings":    s.rootSettingsPath(cfg),
+			"storage_dir":      cfg.StorageDir,
+			"root_repo_local":  cfg.RootRepoLocalDir,
+			"root_repo_branch": cfg.RootRepoBranch,
+		},
+	})
+}
+
+type updateSettingsRequest struct {
+	SaveMode string `json:"save_mode"`
+}
+
+type createSpaceRequest struct {
+	Key         string `json:"key"`
+	DisplayName string `json:"display_name"`
+	Path        string `json:"path,omitempty"`
+	RepoURL     string `json:"repo_url,omitempty"`
+	Branch      string `json:"branch,omitempty"`
+	LocalDir    string `json:"local_dir,omitempty"`
+}
+
+type renameSpaceRequest struct {
+	DisplayName string `json:"display_name"`
+}
+
+func (s *Server) sessionLogin(r *http.Request) string {
+	sid := sessionFromCookie(r)
+	if sid == "" {
+		return ""
+	}
+	sess, ok := s.Sessions.Get(sid)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(sess.Login)
+}
+
+func (s *Server) requireSpaceCreator(w http.ResponseWriter, r *http.Request, sp appsettings.SpaceEntry) (string, bool) {
+	login := s.sessionLogin(r)
+	if login == "" {
+		http.Error(w, "login required", http.StatusUnauthorized)
+		return "", false
+	}
+	creator := strings.TrimSpace(sp.CreatedBy)
+	if creator == "" {
+		http.Error(w, "space has no creator metadata; cannot modify", http.StatusForbidden)
+		return "", false
+	}
+	if !strings.EqualFold(login, creator) {
+		http.Error(w, "only the space creator can perform this action", http.StatusForbidden)
+		return "", false
+	}
+	return login, true
+}
+
+func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
+	var body updateSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	cfg.SaveMode = normalizeSaveMode(body.SaveMode)
+	if err := s.saveSettings(r.Context(), cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.syncRootSettingsIfEnabled(r, cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "settings": cfg})
+}
+
+func (s *Server) createSpace(w http.ResponseWriter, r *http.Request) {
+	var body createSpaceRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	key := strings.TrimSpace(strings.ToLower(body.Key))
+	if key == "" || !keyPattern.MatchString(key) {
+		http.Error(w, "key must match [a-z0-9][a-z0-9-_]*", http.StatusBadRequest)
+		return
+	}
+	displayName := strings.TrimSpace(body.DisplayName)
+	if displayName == "" {
+		displayName = key
+	}
+
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, sp := range cfg.Spaces {
+		if sp.Key == key {
+			http.Error(w, "space already exists", http.StatusConflict)
+			return
+		}
+	}
+
+	entry := appsettings.SpaceEntry{
+		Key:         key,
+		DisplayName: displayName,
+		CreatedBy:   s.sessionLogin(r),
+		RepoURL:     strings.TrimSpace(body.RepoURL),
+		Branch:      strings.TrimSpace(body.Branch),
+		LocalDir:    strings.TrimSpace(body.LocalDir),
+	}
+	if entry.RepoURL == "" {
+		if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushToken(r)); err != nil {
+			if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		p := strings.TrimSpace(body.Path)
+		if p == "" {
+			p = filepath.ToSlash(filepath.Join("spaces", key))
+		}
+		entry.Path = p
+		if entry.Branch == "" {
+			entry.Branch = cfg.RootRepoBranch
+		}
+		if entry.Branch == "" {
+			entry.Branch = "main"
+		}
+
+		spaceRoot := filepath.Join(cfg.RootRepoLocalDir, filepath.FromSlash(entry.Path))
+		if err := os.MkdirAll(spaceRoot, 0o755); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := gitops.EnsureSpaceMeta(spaceRoot, key); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else if entry.Branch == "" {
+		entry.Branch = "main"
+	}
+
+	cfg.Spaces = append(cfg.Spaces, entry)
+	if err := s.saveSettings(r.Context(), cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.syncRootSettingsIfEnabled(r, cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "space": entry, "settings": cfg})
+}
+
+func (s *Server) renameSpace(w http.ResponseWriter, r *http.Request) {
+	spaceKey := strings.TrimSpace(chi.URLParam(r, "space"))
+	if spaceKey == "" {
+		http.Error(w, "space required", http.StatusBadRequest)
+		return
+	}
+	var body renameSpaceRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	nextName := strings.TrimSpace(body.DisplayName)
+	if nextName == "" {
+		http.Error(w, "display_name required", http.StatusBadRequest)
+		return
+	}
+
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	idx := -1
+	for i := range cfg.Spaces {
+		if cfg.Spaces[i].Key == spaceKey {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		http.Error(w, "unknown space", http.StatusNotFound)
+		return
+	}
+	if _, ok := s.requireSpaceCreator(w, r, cfg.Spaces[idx]); !ok {
+		return
+	}
+	cfg.Spaces[idx].DisplayName = nextName
+
+	if err := s.saveSettings(r.Context(), cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.syncRootSettingsIfEnabled(r, cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "space": cfg.Spaces[idx], "settings": cfg})
+}
+
+func (s *Server) deleteSpace(w http.ResponseWriter, r *http.Request) {
+	spaceKey := strings.TrimSpace(chi.URLParam(r, "space"))
+	if spaceKey == "" {
+		http.Error(w, "space required", http.StatusBadRequest)
+		return
+	}
+
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	idx := -1
+	for i := range cfg.Spaces {
+		if cfg.Spaces[i].Key == spaceKey {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		http.Error(w, "unknown space", http.StatusNotFound)
+		return
+	}
+	if _, ok := s.requireSpaceCreator(w, r, cfg.Spaces[idx]); !ok {
+		return
+	}
+	if len(cfg.Spaces) <= 1 {
+		http.Error(w, "cannot delete the last space", http.StatusBadRequest)
+		return
+	}
+
+	cfg.Spaces = append(cfg.Spaces[:idx], cfg.Spaces[idx+1:]...)
+	if err := s.saveSettings(r.Context(), cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.syncRootSettingsIfEnabled(r, cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "settings": cfg})
 }
 
 func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
@@ -40,14 +464,24 @@ func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(body.RootRepoPath) == "" {
-		http.Error(w, "root_repo_path is required", http.StatusBadRequest)
+	cfg, err := s.defaultSettings()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	rootRepo, err := filepath.Abs(body.RootRepoPath)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	if strings.TrimSpace(body.RootLocalDir) != "" {
+		cfg.RootRepoLocalDir, err = filepath.Abs(body.RootLocalDir)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if strings.TrimSpace(body.StorageDir) != "" {
+		cfg.StorageDir, err = filepath.Abs(body.StorageDir)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	spaceKey := strings.TrimSpace(strings.ToLower(body.FirstSpaceKey))
@@ -63,13 +497,22 @@ func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
 		spaceName = "Main Space"
 	}
 
-	if _, err := gitops.EnsureRepo(rootRepo); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.Cfg.ServerGitToken); err != nil {
+		if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
-	spacePath := filepath.ToSlash(filepath.Join("spaces", spaceKey))
-	spaceRoot := filepath.Join(rootRepo, filepath.FromSlash(spacePath))
+	cfg.Spaces = []appsettings.SpaceEntry{{
+		Key:         spaceKey,
+		DisplayName: spaceName,
+		CreatedBy:   s.sessionLogin(r),
+		Path:        ".",
+		Branch:      cfg.RootRepoBranch,
+	}}
+
+	spaceRoot := cfg.RootRepoLocalDir
 	if err := os.MkdirAll(spaceRoot, 0o755); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -86,19 +529,11 @@ func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cfg := appsettings.Settings{
-		RootRepoPath: rootRepo,
-		Spaces: []appsettings.SpaceEntry{{
-			Key:         spaceKey,
-			DisplayName: spaceName,
-			Path:        spacePath,
-		}},
-	}
-	if err := s.Store.Save(r.Context(), cfg); err != nil {
+	if err := s.saveSettings(r.Context(), cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := writeRootSettings(rootRepo, cfg); err != nil {
+	if err := s.syncRootSettingsIfEnabled(r, cfg); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -109,31 +544,45 @@ func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func writeRootSettings(root string, cfg appsettings.Settings) error {
-	metaDir := filepath.Join(root, ".mdwiki")
-	if err := os.MkdirAll(metaDir, 0o755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	return os.WriteFile(filepath.Join(metaDir, "settings.json"), b, 0o644)
-}
-
 func (s *Server) resolveSpaceRoot(r *http.Request, spaceKey string) (string, appsettings.SpaceEntry, bool, error) {
-	cfg, err := s.Store.Load(r.Context())
+	cfg, err := s.loadSettings(r.Context())
 	if err != nil {
 		return "", appsettings.SpaceEntry{}, false, err
 	}
 	for _, sp := range cfg.Spaces {
-		if sp.Key == spaceKey {
-			if filepath.IsAbs(sp.Path) {
-				return sp.Path, sp, true, nil
-			}
-			return filepath.Join(cfg.RootRepoPath, filepath.FromSlash(sp.Path)), sp, true, nil
+		if sp.Key != spaceKey {
+			continue
 		}
+		if strings.TrimSpace(sp.RepoURL) != "" {
+			branch := strings.TrimSpace(sp.Branch)
+			if branch == "" {
+				branch = "main"
+			}
+			cloneDir := strings.TrimSpace(sp.LocalDir)
+			if cloneDir == "" {
+				cloneDir = filepath.Join(cfg.StorageDir, "spaces", sp.Key)
+			}
+			if !filepath.IsAbs(cloneDir) {
+				cloneDir = filepath.Join(cfg.StorageDir, cloneDir)
+			}
+			if _, err := gitops.EnsureClone(cloneDir, sp.RepoURL, branch, s.pushToken(r)); err != nil {
+				return "", appsettings.SpaceEntry{}, false, err
+			}
+			if strings.TrimSpace(sp.Path) == "" || strings.TrimSpace(sp.Path) == "." {
+				return cloneDir, sp, true, nil
+			}
+			return filepath.Join(cloneDir, filepath.FromSlash(sp.Path)), sp, true, nil
+		}
+
+		if _, err := gitops.EnsureClone(cfg.RootRepoLocalDir, cfg.RootRepoURL, cfg.RootRepoBranch, s.pushToken(r)); err != nil {
+			if _, initErr := gitops.EnsureRepo(cfg.RootRepoLocalDir); initErr != nil {
+				return "", appsettings.SpaceEntry{}, false, err
+			}
+		}
+		if strings.TrimSpace(sp.Path) == "" || strings.TrimSpace(sp.Path) == "." {
+			return cfg.RootRepoLocalDir, sp, true, nil
+		}
+		return filepath.Join(cfg.RootRepoLocalDir, filepath.FromSlash(sp.Path)), sp, true, nil
 	}
 	return "", appsettings.SpaceEntry{}, false, nil
 }

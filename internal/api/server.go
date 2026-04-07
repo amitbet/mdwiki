@@ -22,6 +22,7 @@ import (
 	"mdwiki/internal/gitops"
 	"mdwiki/internal/indexbuilder"
 	"mdwiki/internal/oauth"
+	"mdwiki/internal/redisx"
 	"mdwiki/internal/search"
 	"mdwiki/internal/session"
 	"mdwiki/internal/space"
@@ -44,20 +45,23 @@ type Server struct {
 	Store    appsettings.Store
 	Sessions *session.Store
 	Hub      *wshub.Hub
+	Redis    *redisx.PubSub
 	oauth    oauth.Config
 
 	deviceMu    sync.Mutex
 	deviceFlows map[string]*deviceFlowEntry
+	gitWriteMu  sync.Mutex
 }
 
 // New creates API server.
-func New(cfg config.Config, reg *space.Registry, store appsettings.Store, sess *session.Store, hub *wshub.Hub) *Server {
-	return &Server{
+func New(cfg config.Config, reg *space.Registry, store appsettings.Store, sess *session.Store, hub *wshub.Hub, redis *redisx.PubSub) *Server {
+	srv := &Server{
 		Cfg:      cfg,
 		Registry: reg,
 		Store:    store,
 		Sessions: sess,
 		Hub:      hub,
+		Redis:    redis,
 		oauth: oauth.Config{
 			ClientID:     cfg.GitHubClientID,
 			ClientSecret: cfg.GitHubSecret,
@@ -65,6 +69,10 @@ func New(cfg config.Config, reg *space.Registry, store appsettings.Store, sess *
 		},
 		deviceFlows: make(map[string]*deviceFlowEntry),
 	}
+	if redis != nil {
+		go srv.runRedisGitQueueWorker(context.Background())
+	}
+	return srv
 }
 
 func (s *Server) searchForSpace(key string) (*search.Conn, error) {
@@ -90,8 +98,13 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/api/setup/status", s.getSetupStatus)
 	r.Post("/api/setup/init", s.setupInitialSpace)
+	r.Get("/api/settings", s.getSettings)
+	r.Post("/api/settings", s.updateSettings)
 
 	r.Get("/api/spaces", s.listSpaces)
+	r.Post("/api/spaces", s.createSpace)
+	r.Post("/api/spaces/{space}/rename", s.renameSpace)
+	r.Delete("/api/spaces/{space}", s.deleteSpace)
 	r.Get("/api/session", s.getSession)
 
 	r.Get("/auth/github", s.githubStart)
@@ -102,7 +115,13 @@ func (s *Server) Router() http.Handler {
 	r.Get("/api/spaces/{space}/page", s.getPage)
 	r.Get("/api/spaces/{space}/pages", s.listPages)
 	r.Post("/api/spaces/{space}/pages", s.createPage)
+	r.Delete("/api/spaces/{space}/pages", s.deletePage)
+	r.Post("/api/spaces/{space}/pages/rename", s.renamePage)
+	r.Get("/api/spaces/{space}/comments", s.listComments)
 	r.Post("/api/spaces/{space}/comments", s.addComment)
+	r.Post("/api/spaces/{space}/comments/{thread}/reply", s.replyComment)
+	r.Post("/api/spaces/{space}/comments/{thread}/edit", s.editComment)
+	r.Post("/api/spaces/{space}/comments/{thread}/resolve", s.resolveComment)
 	r.Get("/api/spaces/{space}/git", s.gitConsole)
 	r.Post("/api/spaces/{space}/page", s.savePage)
 	r.Post("/api/spaces/{space}/index", s.reindexSpace)
@@ -110,8 +129,8 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/api/spaces/{space}/search", s.searchSpace)
 
-	// WebSocket Yjs
-	r.With(s.requireSession).Get("/ws", s.handleWS)
+	// WebSocket Yjs (session optional; anonymous fallback keeps realtime working after dev reloads)
+	r.Get("/ws", s.handleWS)
 
 	return r
 }
@@ -120,7 +139,7 @@ func cors(origin string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Cookie")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
 			if r.Method == http.MethodOptions {
@@ -133,18 +152,30 @@ func cors(origin string) func(http.Handler) http.Handler {
 }
 
 func (s *Server) listSpaces(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.Store.Load(r.Context())
+	cfg, err := s.loadSettings(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	var out []map[string]string
 	for _, sp := range cfg.Spaces {
+		repoURL := strings.TrimSpace(sp.RepoURL)
+		if repoURL == "" {
+			repoURL = strings.TrimSpace(cfg.RootRepoURL)
+		}
+		branch := strings.TrimSpace(sp.Branch)
+		if branch == "" {
+			branch = strings.TrimSpace(cfg.RootRepoBranch)
+			if branch == "" {
+				branch = "main"
+			}
+		}
 		out = append(out, map[string]string{
-			"key":          sp.Key,
-			"display_name": sp.DisplayName,
-			"repo_url":     cfg.RootRepoPath,
-			"branch":       "main",
+			"key":              sp.Key,
+			"display_name":     sp.DisplayName,
+			"created_by_login": strings.TrimSpace(sp.CreatedBy),
+			"repo_url":         repoURL,
+			"branch":           branch,
 		})
 	}
 	_ = json.NewEncoder(w).Encode(out)
@@ -350,6 +381,11 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown space", http.StatusNotFound)
 		return
 	}
+	cfg, err := s.loadSettings(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	authorName := "mdwiki"
 	authorEmail := "local@mdwiki"
 	if sid := sessionFromCookie(r); sid != "" {
@@ -364,20 +400,57 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := gitops.WritePageLocal(root, body.Path, body.Content, authorName, authorEmail, body.CoAuthors); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+
+	saveMode := normalizeSaveMode(cfg.SaveMode)
+	branch := strings.TrimSpace(ent.Branch)
+	if branch == "" {
+		branch = strings.TrimSpace(cfg.RootRepoBranch)
 	}
-	commit := GitHeadShort(root)
+	if branch == "" {
+		branch = "main"
+	}
+	commit := ""
+	msg := "Saved locally (no git commit)"
+	if saveMode == "local" {
+		if err := gitops.WriteFileOnly(root, body.Path, body.Content); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		repoRoot, repoRelPath, err := resolveRepoPath(root, body.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		res, err := s.executeGitWrite(r.Context(), gitWriteJob{
+			ID:          session.NewID(),
+			Op:          "save",
+			RepoRoot:    repoRoot,
+			Branch:      branch,
+			Path:        repoRelPath,
+			Content:     body.Content,
+			AuthorName:  authorName,
+			AuthorEmail: authorEmail,
+			PushToken:   s.pushToken(r),
+			CoAuthors:   body.CoAuthors,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		commit = res.Commit
+		msg = res.Message
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":           true,
 		"path":         body.Path,
 		"commit":       commit,
 		"repo_url":     root,
-		"branch":       "main",
+		"branch":       branch,
 		"display_name": ent.DisplayName,
-		"message":      "Committed locally",
+		"save_mode":    saveMode,
+		"message":      msg,
 	})
 }
 
@@ -482,10 +555,6 @@ func (s *Server) searchSpace(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	sid := sessionFromCookie(r)
 	sess, ok := s.Sessions.Get(sid)
-	if !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 	spaceKey := r.URL.Query().Get("space")
 	pagePath := r.URL.Query().Get("page")
 	if spaceKey == "" || pagePath == "" {
@@ -497,13 +566,18 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	room := spaceKey + ":" + pagePath
+	userID := "local"
+	if ok && strings.TrimSpace(sess.Login) != "" {
+		userID = strings.TrimSpace(sess.Login)
+	}
 	cl := &wshub.Client{
-		ID:     session.NewID(),
-		Room:   room,
-		Conn:   conn,
-		Send:   make(chan []byte, 256),
-		Hub:    s.Hub,
-		UserID: sess.Login,
+		ID:       session.NewID(),
+		Room:     room,
+		Conn:     conn,
+		Send:     make(chan []byte, 256),
+		TextSend: make(chan []byte, 128),
+		Hub:      s.Hub,
+		UserID:   userID,
 	}
 	s.Hub.Register(cl)
 
@@ -557,6 +631,14 @@ func (s *Server) writePump(c *wshub.Client) {
 			}
 			_ = c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := c.Conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
+				return
+			}
+		case msg, ok := <-c.TextSend:
+			if !ok {
+				return
+			}
+			_ = c.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.Conn.WriteMessage(websocket.TextMessage, msg); err != nil {
 				return
 			}
 		case <-ticker.C:
