@@ -29,7 +29,18 @@ server:
 	MDWIKI_LISTEN=:$(SERVER_PORT) go run ./cmd/wiki
 
 server-live:
-	MDWIKI_LISTEN=:$(SERVER_PORT) air -c .air.toml
+	@AIR_BIN="$$(command -v air 2>/dev/null || true)"; \
+	if [ -z "$$AIR_BIN" ] && [ -x "$$(go env GOPATH)/bin/air" ]; then \
+		AIR_BIN="$$(go env GOPATH)/bin/air"; \
+	fi; \
+	if [ -n "$$AIR_BIN" ]; then \
+		echo "Using air for backend live-reload: $$AIR_BIN"; \
+		MDWIKI_LISTEN=:$(SERVER_PORT) "$$AIR_BIN" -c .air.toml; \
+	else \
+		echo "air not found; falling back to go run (no backend live-reload)"; \
+		echo "Run 'make install' once to install air, or add \`$$(go env GOPATH)/bin\` to PATH."; \
+		MDWIKI_LISTEN=:$(SERVER_PORT) go run ./cmd/wiki; \
+	fi
 
 ui:
 	cd web && MDWIKI_BACKEND=$(BACKEND_URL) npm run dev -- --port $(UI_PORT) --host localhost
