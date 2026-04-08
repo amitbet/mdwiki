@@ -458,6 +458,7 @@ export default function WikiEditor({
   const dirtyRef = useRef(false);
   const [wsReconnectTick, setWsReconnectTick] = useState(0);
   const canEdit = isEditing && !readOnly;
+  const canComment = !readOnly;
 
   const ydoc = useMemo(() => new Y.Doc(), [space, path]);
   const CommentHighlight = useMemo(
@@ -629,9 +630,16 @@ export default function WikiEditor({
       if (!editor) {
         return;
       }
+      const normalizedIncoming = canonicalMarkdown(md);
+      const normalizedCurrent = canonicalMarkdown(htmlToMarkdown(editor.getHTML()));
+      if (normalizedIncoming === normalizedCurrent && normalizedIncoming === canonicalMarkdown(lastSavedMarkdownRef.current)) {
+        setMarkdown(md);
+        setDirty(false);
+        return;
+      }
       const html = await renderGFM(md);
       suppressDirtyTrackingForTick();
-      lastSavedMarkdownRef.current = canonicalMarkdown(md);
+      lastSavedMarkdownRef.current = normalizedIncoming;
       setMarkdown(md);
       setDirty(false);
       editor.commands.setContent(html, { emitUpdate: true });
@@ -909,7 +917,7 @@ export default function WikiEditor({
         void loadTree();
         void loadComments();
         if (!dirtyRef.current) {
-          void seedFromHttp();
+          seedFromHttpIfEmpty();
         }
       }
       scheduleReconnect();
@@ -1400,6 +1408,11 @@ export default function WikiEditor({
     if (!editor || !contextMenu) {
       return;
     }
+    if (!canComment) {
+      setError("Comments are unavailable while realtime sync is read-only.");
+      setContextMenu(null);
+      return;
+    }
     if (contextMenu.from >= contextMenu.to) {
       setError("Select text first, then right-click to add a comment.");
       setContextMenu(null);
@@ -1445,7 +1458,7 @@ export default function WikiEditor({
       setContextMenu(null);
       await loadTree();
     }
-  }, [commitCurrentState, contextMenu, editor, loadComments, loadTree, path, space]);
+  }, [canComment, commitCurrentState, contextMenu, editor, loadComments, loadTree, path, space]);
 
   const withThreadMutation = useCallback(
     async (
@@ -1814,7 +1827,7 @@ export default function WikiEditor({
               scheduleHidePopover();
             }}
             onContextMenu={(e) => {
-              if (!editor || !canEdit) {
+              if (!editor || !canComment) {
                 return;
               }
               e.preventDefault();
