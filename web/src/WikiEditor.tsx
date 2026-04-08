@@ -1,6 +1,7 @@
 import Collaboration from "@tiptap/extension-collaboration";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import Highlight from "@tiptap/extension-highlight";
+import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -23,6 +24,7 @@ import typescript from "highlight.js/lib/languages/typescript";
 import yaml from "highlight.js/lib/languages/yaml";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
+import { DiagramPreview } from "./DiagramPreview";
 import { htmlToMarkdown } from "./md/htmlToMarkdown";
 import { renderGFM } from "./md/render";
 
@@ -111,8 +113,43 @@ type SettingsInfo = {
   };
 };
 
+type DraftInfo = {
+  exists: boolean;
+  base_commit?: string;
+  current_base_commit?: string;
+  updated_at?: string;
+  format?: string;
+  update_b64?: string;
+  markdown?: string;
+  base_changed?: boolean;
+};
+
+type DiagramEditorState = {
+  path: string;
+  kind: "excalidraw" | "drawio";
+  content: string;
+};
+
 const DEFAULT_PAGE_TEXT = "# New Page\n\nStart writing here.\n";
-const CODE_LANGUAGES = ["plaintext", "javascript", "typescript", "json", "bash", "go", "html", "css", "markdown", "yaml"] as const;
+const CODE_LANGUAGES = [
+  "plaintext",
+  "javascript",
+  "typescript",
+  "json",
+  "bash",
+  "go",
+  "html",
+  "css",
+  "markdown",
+  "yaml",
+  "mermaid",
+  "chart",
+  "graphviz",
+  "dot",
+  "vega-lite",
+  "vega",
+  "plantuml",
+] as const;
 const REALTIME_CONNECTION_FAILED_ERROR = "realtime sync connection failed";
 
 const lowlight = createLowlight();
@@ -126,6 +163,13 @@ lowlight.register("html", html);
 lowlight.register("css", css);
 lowlight.register("markdown", markdown);
 lowlight.register("yaml", yaml);
+lowlight.register("mermaid", plaintext);
+lowlight.register("chart", json);
+lowlight.register("graphviz", plaintext);
+lowlight.register("dot", plaintext);
+lowlight.register("vega-lite", json);
+lowlight.register("vega", json);
+lowlight.register("plantuml", plaintext);
 
 function canonicalMarkdown(input: string): string {
   return input
@@ -142,6 +186,35 @@ function escapeHTML(s: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function assetApiURL(space: string, relPath: string): string {
+  return `/api/spaces/${encodeURIComponent(space)}/asset?path=${encodeURIComponent(relPath)}`;
+}
+
+function diagramKindForPath(path: string): "excalidraw" | "drawio" | null {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".excalidraw")) {
+    return "excalidraw";
+  }
+  if (lower.endsWith(".drawio")) {
+    return "drawio";
+  }
+  return null;
+}
+
+function diagramPlaceholderHTML(path: string): string {
+  const name = escapeHTML(path.split("/").pop() || path);
+  const safePath = escapeHTML(path);
+  return `<p><a href="${safePath}">Diagram: ${name}</a></p>`;
+}
+
+function isRelativeAssetPath(src: string): boolean {
+  const trimmed = src.trim();
+  if (!trimmed) {
+    return false;
+  }
+  return !/^(https?:|data:|blob:|\/)/i.test(trimmed);
 }
 
 function pageTitle(path: string): string {
@@ -447,6 +520,10 @@ export default function WikiEditor({
   const [pageContextMenu, setPageContextMenu] = useState<{ x: number; y: number; pagePath: string } | null>(null);
   const [spaceContextMenu, setSpaceContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [collapsedPageNodes, setCollapsedPageNodes] = useState<Record<string, boolean>>({});
+  const [draftInfo, setDraftInfo] = useState<DraftInfo | null>(null);
+  const [baseCommit, setBaseCommit] = useState("");
+  const [compareDraftOpen, setCompareDraftOpen] = useState(false);
+  const [diagramEditor, setDiagramEditor] = useState<DiagramEditorState | null>(null);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const popoverHoverRef = useRef(false);
   const lastSavedMarkdownRef = useRef("");
@@ -456,6 +533,8 @@ export default function WikiEditor({
   const wsReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsReconnectAttemptsRef = useRef(0);
   const dirtyRef = useRef(false);
+  const isEditingRef = useRef(isEditing);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [wsReconnectTick, setWsReconnectTick] = useState(0);
   const canEdit = isEditing && !readOnly;
   const canComment = !readOnly;
@@ -492,6 +571,7 @@ export default function WikiEditor({
         }),
         CommentHighlight,
         Underline,
+        Image,
         Link.configure({ openOnClick: false }),
         Collaboration.configure({
           document: ydoc,
@@ -516,13 +596,13 @@ export default function WikiEditor({
       onUpdate({ editor: ed }) {
         const next = htmlToMarkdown(ed.getHTML());
         setMarkdown(next);
-        if (applyingRemoteSyncRef.current || suppressDirtyTrackingRef.current || !isEditing) {
+        if (applyingRemoteSyncRef.current || suppressDirtyTrackingRef.current || !isEditingRef.current) {
           return;
         }
         setDirty(canonicalMarkdown(next) !== canonicalMarkdown(lastSavedMarkdownRef.current));
       },
     },
-    [CommentHighlight, isEditing, ydoc],
+    [CommentHighlight, ydoc],
   );
 
   const commitCurrentState = useCallback(async () => {
@@ -558,6 +638,10 @@ export default function WikiEditor({
   useEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
+
+  useEffect(() => {
+    isEditingRef.current = isEditing;
+  }, [isEditing]);
 
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -647,6 +731,23 @@ export default function WikiEditor({
     [editor, suppressDirtyTrackingForTick],
   );
 
+  const applyRecoveredMarkdown = useCallback(
+    async (md: string) => {
+      if (!editor) {
+        return;
+      }
+      const html = await renderGFM(md);
+      suppressDirtyTrackingForTick();
+      setMarkdown(md);
+      editor.commands.setContent(html, { emitUpdate: true });
+      setIsEditing(true);
+      window.setTimeout(() => {
+        setDirty(canonicalMarkdown(md) !== canonicalMarkdown(lastSavedMarkdownRef.current));
+      }, 0);
+    },
+    [editor, suppressDirtyTrackingForTick],
+  );
+
   const loadTree = useCallback(async (): Promise<PageTreeNode[]> => {
     try {
       const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/pages`, { credentials: "include" });
@@ -698,6 +799,86 @@ export default function WikiEditor({
     }
   }, []);
 
+  const loadDraft = useCallback(async () => {
+    try {
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/draft?path=${encodeURIComponent(path)}`, {
+        credentials: "include",
+      });
+      if (!r.ok) {
+        throw new Error(await r.text());
+      }
+      const j = (await r.json()) as DraftInfo;
+      setDraftInfo(j.exists ? j : null);
+    } catch {
+      setDraftInfo(null);
+    }
+  }, [path, space]);
+
+  const persistDraft = useCallback(async () => {
+    if (!editor || !isEditingRef.current || !dirtyRef.current) {
+      return;
+    }
+    const md = htmlToMarkdown(editor.getHTML());
+    const updateB64 = uint8ToBase64(Y.encodeStateAsUpdate(ydoc));
+    const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/draft`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        path,
+        base_commit: baseCommit,
+        format: "yjs",
+        update_b64: updateB64,
+        markdown: md,
+      }),
+    });
+    if (!r.ok) {
+      throw new Error(await readApiError(r, "draft save failed"));
+    }
+    const j = (await r.json()) as { updated_at?: string; base_commit?: string };
+    setDraftInfo((prev) => ({
+      exists: true,
+      markdown: md,
+      update_b64: updateB64,
+      format: "yjs",
+      updated_at: j.updated_at ?? prev?.updated_at,
+      base_commit: j.base_commit ?? baseCommit,
+      current_base_commit: prev?.current_base_commit ?? baseCommit,
+      base_changed: prev?.base_changed ?? false,
+    }));
+  }, [baseCommit, editor, path, space, ydoc]);
+
+  useEffect(() => {
+    const flushDraft = () => {
+      if (!dirtyRef.current || !isEditingRef.current) {
+        return;
+      }
+      void persistDraft().catch(() => {});
+    };
+    const onVisibility = () => {
+      if (document.hidden) {
+        flushDraft();
+      }
+    };
+    window.addEventListener("blur", flushDraft);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("blur", flushDraft);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [persistDraft]);
+
+  const discardDraft = useCallback(async () => {
+    const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/draft?path=${encodeURIComponent(path)}`, {
+      method: "DELETE",
+      credentials: "include",
+    });
+    if (!r.ok) {
+      throw new Error(await readApiError(r, "draft delete failed"));
+    }
+    setDraftInfo(null);
+  }, [path, space]);
+
   const seedFromHttp = useCallback(async () => {
     if (!editor) {
       return;
@@ -708,15 +889,17 @@ export default function WikiEditor({
     if (!r.ok) {
       return;
     }
-    const j = (await r.json()) as { content?: string };
+    const j = (await r.json()) as { content?: string; base_commit?: string };
     const md = typeof j.content === "string" ? j.content : DEFAULT_PAGE_TEXT;
+    setBaseCommit(typeof j.base_commit === "string" ? j.base_commit : "");
     await applyTrustedMarkdown(md);
   }, [applyTrustedMarkdown, editor, path, space, ydoc]);
 
   useEffect(() => {
     void loadTree();
     void loadComments();
-  }, [loadComments, loadTree]);
+    void loadDraft();
+  }, [loadComments, loadDraft, loadTree]);
 
   useEffect(() => {
     const onFocus = () => {
@@ -972,6 +1155,8 @@ export default function WikiEditor({
       }
       setConsecutiveSaveFailures(0);
       setDirty(false);
+      await discardDraft().catch(() => {});
+      setDraftInfo(null);
       await loadTree();
       await loadComments();
     } catch (e) {
@@ -985,12 +1170,14 @@ export default function WikiEditor({
     } finally {
       setSaving(false);
     }
-  }, [commitCurrentState, consecutiveSaveFailures, loadComments, loadTree]);
+  }, [commitCurrentState, consecutiveSaveFailures, discardDraft, loadComments, loadTree]);
 
   useEffect(() => {
     setDirty(false);
     setIsEditing(false);
     lastSavedMarkdownRef.current = "";
+    setDraftInfo(null);
+    setBaseCommit("");
   }, [space, path]);
 
   useEffect(() => {
@@ -998,15 +1185,15 @@ export default function WikiEditor({
       return;
     }
     const id = window.setInterval(() => {
-      if (!dirty || saving || consecutiveSaveFailures >= 3) {
+      if (!dirty || saving) {
         return;
       }
-      void save();
-    }, 2000);
+      void persistDraft().catch(() => {});
+    }, 5000);
     return () => {
       window.clearInterval(id);
     };
-  }, [canEdit, consecutiveSaveFailures, dirty, save, saving]);
+  }, [canEdit, dirty, persistDraft, saving]);
 
   const toggleEditing = useCallback(async () => {
     if (isEditing) {
@@ -1485,6 +1672,133 @@ export default function WikiEditor({
     [commitCurrentState, loadComments],
   );
 
+  const restoreDraft = useCallback(async () => {
+    if (!draftInfo?.markdown) {
+      return;
+    }
+    await applyRecoveredMarkdown(draftInfo.markdown);
+    setStatus(`Recovered draft ${new Date().toLocaleTimeString()}`);
+  }, [applyRecoveredMarkdown, draftInfo?.markdown]);
+
+  const shouldShowDraftBanner = Boolean(
+    draftInfo?.exists &&
+      !isEditing &&
+      canonicalMarkdown(draftInfo.markdown ?? "") !== canonicalMarkdown(lastSavedMarkdownRef.current),
+  );
+  const draftBannerInfo = shouldShowDraftBanner ? draftInfo : null;
+
+  const triggerImageUpload = useCallback(() => {
+    imageInputRef.current?.click();
+  }, []);
+
+  const uploadImageAndInsert = useCallback(
+    async (file: File) => {
+      if (!editor) {
+        return;
+      }
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/assets/image`, {
+        method: "POST",
+        credentials: "include",
+        body: fd,
+      });
+      if (!r.ok) {
+        throw new Error(await readApiError(r, "image upload failed"));
+      }
+      const j = (await r.json()) as { path?: string };
+      const imagePath = typeof j.path === "string" ? j.path : "";
+      if (!imagePath) {
+        throw new Error("image upload did not return a path");
+      }
+      editor.chain().focus().setImage({ src: imagePath, alt: file.name }).run();
+      setDirty(true);
+      setStatus(`Image inserted ${new Date().toLocaleTimeString()}`);
+      await loadTree();
+    },
+    [editor, loadTree, space],
+  );
+
+  const createDiagramAsset = useCallback(
+    async (kind: "excalidraw" | "drawio") => {
+      if (!editor) {
+        return;
+      }
+      const suggested = kind === "excalidraw" ? "diagram.excalidraw" : "diagram.drawio";
+      const name = window.prompt(`New ${kind} file name`, suggested);
+      if (!name || name.trim().length === 0) {
+        return;
+      }
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/diagrams`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind, name: name.trim() }),
+      });
+      if (!r.ok) {
+        throw new Error(await readApiError(r, "diagram create failed"));
+      }
+      const j = (await r.json()) as { path?: string; content?: string };
+      const diagramPath = typeof j.path === "string" ? j.path : "";
+      if (!diagramPath) {
+        throw new Error("diagram create did not return a path");
+      }
+      editor.chain().focus().insertContent(diagramPlaceholderHTML(diagramPath)).run();
+      setDirty(true);
+      setDiagramEditor({
+        path: diagramPath,
+        kind,
+        content: typeof j.content === "string" ? j.content : "",
+      });
+      setStatus(`Diagram created ${new Date().toLocaleTimeString()}`);
+      await loadTree();
+    },
+    [editor, loadTree, space],
+  );
+
+  const openDiagramEditor = useCallback(
+    async (diagramPath: string) => {
+      const kind = diagramKindForPath(diagramPath);
+      if (!kind) {
+        return;
+      }
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/diagram?path=${encodeURIComponent(diagramPath)}`, {
+        credentials: "include",
+      });
+      if (!r.ok) {
+        throw new Error(await readApiError(r, "diagram load failed"));
+      }
+      const j = (await r.json()) as { content?: string };
+      setDiagramEditor({
+        path: diagramPath,
+        kind,
+        content: typeof j.content === "string" ? j.content : "",
+      });
+    },
+    [space],
+  );
+
+  const saveDiagramEditor = useCallback(async () => {
+    if (!diagramEditor) {
+      return;
+    }
+    const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/diagram`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: diagramEditor.path,
+        content: diagramEditor.content,
+      }),
+    });
+    if (!r.ok) {
+      throw new Error(await readApiError(r, "diagram save failed"));
+    }
+    setStatus(`Diagram saved ${new Date().toLocaleTimeString()}`);
+    setDiagramEditor(null);
+    await loadTree();
+  }, [diagramEditor, loadTree, space]);
+
   const scheduleHidePopover = useCallback(() => {
     if (hideTimerRef.current) {
       clearTimeout(hideTimerRef.current);
@@ -1495,6 +1809,55 @@ export default function WikiEditor({
       }
     }, 180);
   }, []);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const root = editor.view.dom as HTMLElement;
+      root.querySelectorAll("img").forEach((img) => {
+        const current = img.getAttribute("src") || "";
+        const original = (img.getAttribute("data-mdwiki-src") || current).trim();
+        if (!isRelativeAssetPath(original)) {
+          return;
+        }
+        img.setAttribute("data-mdwiki-src", original);
+        img.setAttribute("src", assetApiURL(space, original));
+        img.classList.add("wiki-embedded-image");
+      });
+      root.querySelectorAll("a[href]").forEach((anchor) => {
+        const href = (anchor.getAttribute("href") || "").trim();
+        if (!href) {
+          return;
+        }
+        const kind = diagramKindForPath(href);
+        if (kind) {
+          const host = anchor.closest("p") ?? anchor.parentElement ?? anchor;
+          const name = anchor.textContent?.replace(/^Diagram:\s*/i, "").trim() || href.split("/").pop() || href;
+          host.classList.add("diagram-embed-host");
+          host.innerHTML = `
+            <div class="diagram-embed-card" contenteditable="false">
+              <div class="diagram-embed-meta">
+                <strong>${escapeHTML(name)}</strong>
+                <span>${escapeHTML(kind)}</span>
+              </div>
+              <div class="diagram-embed-actions">
+                <button type="button" data-diagram-action="edit" data-diagram-path="${escapeHTML(href)}">Edit</button>
+                <button type="button" data-diagram-action="open" data-diagram-path="${escapeHTML(href)}">Open file</button>
+              </div>
+            </div>`;
+          return;
+        }
+        if (isRelativeAssetPath(href)) {
+          anchor.setAttribute("target", "_blank");
+          anchor.setAttribute("rel", "noreferrer noopener");
+          anchor.setAttribute("href", assetApiURL(space, href));
+        }
+      });
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [editor, isEditing, markdown, space]);
 
   const activeThread = popover ? threadsByAnchor[popover.anchorId] : undefined;
   const headingValue = editor?.isActive("heading", { level: 1 })
@@ -1785,7 +2148,41 @@ export default function WikiEditor({
             <IconButton title="Link" active={!!editor?.isActive("link")} onClick={insertLink} disabled={!canEdit}>
               <InsertLinkIcon fontSize="small" />
             </IconButton>
+            <button type="button" className="tool-btn tool-btn-text" onClick={triggerImageUpload} disabled={!canEdit}>
+              Image
+            </button>
+            <button type="button" className="tool-btn tool-btn-text" onClick={() => void createDiagramAsset("excalidraw")} disabled={!canEdit}>
+              Excalidraw
+            </button>
+            <button type="button" className="tool-btn tool-btn-text" onClick={() => void createDiagramAsset("drawio")} disabled={!canEdit}>
+              draw.io
+            </button>
           </div>
+
+          {draftBannerInfo ? (
+            <div className="draft-banner">
+              <div>
+                Unsaved draft found{draftBannerInfo.updated_at ? ` from ${new Date(draftBannerInfo.updated_at).toLocaleString()}` : ""}.
+                {draftBannerInfo.base_changed ? " This page changed since the draft was created." : ""}
+              </div>
+              <div className="draft-banner-actions">
+                <button type="button" onClick={() => void restoreDraft()}>
+                  Restore
+                </button>
+                <button type="button" onClick={() => setCompareDraftOpen(true)}>
+                  Compare
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void discardDraft().catch((e) => setError(e instanceof Error ? e.message : "draft delete failed"));
+                  }}
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          ) : null}
 
           <div
             className="editor-container"
@@ -1839,11 +2236,42 @@ export default function WikiEditor({
                 to: Math.max(sel.from, sel.to),
               });
             }}
-            onClick={() => {
+            onClick={(e) => {
+              const target = e.target as HTMLElement | null;
+              const actionEl = target?.closest("[data-diagram-action]") as HTMLElement | null;
+              if (actionEl) {
+                e.preventDefault();
+                e.stopPropagation();
+                const diagramPath = (actionEl.getAttribute("data-diagram-path") || "").trim();
+                const action = (actionEl.getAttribute("data-diagram-action") || "").trim();
+                if (diagramPath && action === "edit") {
+                  void openDiagramEditor(diagramPath).catch((err) => setError(err instanceof Error ? err.message : "diagram load failed"));
+                  return;
+                }
+                if (diagramPath && action === "open") {
+                  window.open(assetApiURL(space, diagramPath), "_blank", "noopener,noreferrer");
+                  return;
+                }
+              }
               setContextMenu(null);
             }}
           >
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden-file-input"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.currentTarget.value = "";
+                if (!file) {
+                  return;
+                }
+                void uploadImageAndInsert(file).catch((err) => setError(err instanceof Error ? err.message : "image upload failed"));
+              }}
+            />
             <EditorContent editor={editor} />
+            <DiagramPreview active={!isEditing} contentKey={markdown} theme={theme} />
             {codeLangHover ? (
               <div className="code-lang-pop" style={{ left: codeLangHover.x, top: codeLangHover.y }}>
                 <span className="code-lang-label">Language</span>
@@ -2198,6 +2626,72 @@ export default function WikiEditor({
             </div>
           ) : null}
 
+          {compareDraftOpen && draftInfo?.markdown ? (
+            <div className="settings-backdrop" onClick={() => setCompareDraftOpen(false)}>
+              <div className="settings-modal draft-compare-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="settings-header">
+                  <strong>Compare saved page and recovered draft</strong>
+                  <button type="button" className="top-icon-btn" onClick={() => setCompareDraftOpen(false)} title="Close">
+                    x
+                  </button>
+                </div>
+                <div className="draft-compare-grid">
+                  <div>
+                    <div className="draft-compare-label">Saved page</div>
+                    <pre className="error-details-pre">{lastSavedMarkdownRef.current || markdown}</pre>
+                  </div>
+                  <div>
+                    <div className="draft-compare-label">Recovered draft</div>
+                    <pre className="error-details-pre">{draftInfo.markdown}</pre>
+                  </div>
+                </div>
+                <div className="settings-inline">
+                  <button type="button" onClick={() => setCompareDraftOpen(false)}>
+                    Close
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void restoreDraft();
+                      setCompareDraftOpen(false);
+                    }}
+                  >
+                    Restore draft
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {diagramEditor ? (
+            <div className="settings-backdrop" onClick={() => setDiagramEditor(null)}>
+              <div className="settings-modal diagram-editor-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="settings-header">
+                  <strong>Edit {diagramEditor.kind}</strong>
+                  <button type="button" className="top-icon-btn" onClick={() => setDiagramEditor(null)} title="Close">
+                    x
+                  </button>
+                </div>
+                <div className="diagram-editor-path">{diagramEditor.path}</div>
+                <textarea
+                  className="diagram-editor-textarea"
+                  value={diagramEditor.content}
+                  onChange={(e) =>
+                    setDiagramEditor((prev) => (prev ? { ...prev, content: e.target.value } : prev))
+                  }
+                />
+                <div className="settings-inline">
+                  <button type="button" onClick={() => setDiagramEditor(null)}>
+                    Cancel
+                  </button>
+                  <button type="button" onClick={() => void saveDiagramEditor()}>
+                    Save diagram
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           {errorDetailsOpen ? (
             <div className="settings-backdrop" onClick={() => setErrorDetailsOpen(false)}>
               <div className="settings-modal error-details-modal" onClick={(e) => e.stopPropagation()}>
@@ -2213,7 +2707,7 @@ export default function WikiEditor({
           ) : null}
 
           <div className="editor-status">
-            {status || (dirty ? "Unsaved changes (autosave every 2s)" : "All changes saved")}
+            {status || (dirty ? "Unsaved changes (draft autosave active)" : "All changes saved")}
             {error ? (
               <>
                 {" "}

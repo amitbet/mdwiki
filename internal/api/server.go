@@ -133,6 +133,14 @@ func (s *Server) Router() http.Handler {
 	r.Post("/api/spaces/{space}/pages", s.createPage)
 	r.Delete("/api/spaces/{space}/pages", s.deletePage)
 	r.Post("/api/spaces/{space}/pages/rename", s.renamePage)
+	r.Get("/api/spaces/{space}/draft", s.getDraft)
+	r.Post("/api/spaces/{space}/draft", s.saveDraft)
+	r.Delete("/api/spaces/{space}/draft", s.deleteDraft)
+	r.Get("/api/spaces/{space}/asset", s.assetFile)
+	r.Post("/api/spaces/{space}/assets/image", s.uploadImageAsset)
+	r.Post("/api/spaces/{space}/diagrams", s.createDiagram)
+	r.Get("/api/spaces/{space}/diagram", s.getDiagram)
+	r.Post("/api/spaces/{space}/diagram", s.updateDiagram)
 	r.Get("/api/spaces/{space}/comments", s.listComments)
 	r.Post("/api/spaces/{space}/comments", s.addComment)
 	r.Post("/api/spaces/{space}/comments/{thread}/reply", s.replyComment)
@@ -463,6 +471,9 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 		}
 		commit = res.Commit
 		msg = res.Message
+		if clearErr := s.deleteDraftForPath(r.Context(), r, spaceKey, root, ent.Branch, body.Path); clearErr != nil {
+			log.Printf("draft clear after page save failed: space=%s path=%s err=%v", spaceKey, body.Path, clearErr)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -502,10 +513,15 @@ func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	baseCommit := ""
+	if repoRoot, repoRelPath, mapErr := resolveRepoPath(root, path); mapErr == nil {
+		baseCommit, _ = gitops.LastCommitForPath(repoRoot, repoRelPath)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]string{
-		"path":    path,
-		"content": string(b),
+		"path":        path,
+		"content":     string(b),
+		"base_commit": baseCommit,
 	})
 }
 

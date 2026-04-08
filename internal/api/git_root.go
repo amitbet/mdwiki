@@ -31,6 +31,14 @@ func resolveRepoPath(spaceRoot, relPath string) (repoRoot, repoRelPath string, e
 	return root, rel, nil
 }
 
+func repoRootForSpace(spaceRoot string) (string, error) {
+	absRoot, err := filepath.Abs(spaceRoot)
+	if err != nil {
+		return "", err
+	}
+	return nearestGitRoot(absRoot)
+}
+
 func nearestGitRoot(start string) (string, error) {
 	cur := start
 	for {

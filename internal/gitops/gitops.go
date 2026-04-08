@@ -3,6 +3,7 @@ package gitops
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -151,11 +152,16 @@ func Pull(root, authUser, token string) error {
 
 // WriteFileOnly writes content to disk without any git add/commit/push.
 func WriteFileOnly(root, relPath, content string) error {
+	return WriteFileBytesOnly(root, relPath, []byte(content))
+}
+
+// WriteFileBytesOnly writes raw bytes to disk without any git add/commit/push.
+func WriteFileBytesOnly(root, relPath string, content []byte) error {
 	full := filepath.Join(root, relPath)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(full, []byte(content), 0o644)
+	return os.WriteFile(full, content, 0o644)
 }
 
 // Push pushes local commits to origin when configured.
@@ -230,11 +236,16 @@ func WritePage(root, relPath, content, authorName, authorEmail, pusherToken stri
 
 // WritePageLocal writes relative path content and creates a local commit.
 func WritePageLocal(root, branch, relPath, content, authorName, authorEmail string, coAuthors []string) error {
+	return WriteFileCommitLocal(root, branch, relPath, []byte(content), authorName, authorEmail, fmt.Sprintf("wiki: update %s", relPath), coAuthors)
+}
+
+// WriteFileCommitLocal writes raw bytes and creates a local commit with the provided message.
+func WriteFileCommitLocal(root, branch, relPath string, content []byte, authorName, authorEmail, commitMessage string, coAuthors []string) error {
 	full := filepath.Join(root, relPath)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(full, content, 0o644); err != nil {
 		return err
 	}
 	r, err := EnsureRepo(root)
@@ -261,7 +272,10 @@ func WritePageLocal(root, branch, relPath, content, authorName, authorEmail stri
 	if status.IsClean() {
 		return nil
 	}
-	msg := fmt.Sprintf("wiki: update %s", relPath)
+	msg := strings.TrimSpace(commitMessage)
+	if msg == "" {
+		msg = fmt.Sprintf("wiki: update %s", relPath)
+	}
 	if len(coAuthors) > 0 {
 		msg += "\n\n"
 		for _, ca := range coAuthors {
@@ -283,6 +297,11 @@ func WritePageLocal(root, branch, relPath, content, authorName, authorEmail stri
 
 // DeleteFileLocal removes a tracked file and creates a local commit when there is a change.
 func DeleteFileLocal(root, branch, relPath, authorName, authorEmail string) error {
+	return DeleteFileLocalWithMessage(root, branch, relPath, authorName, authorEmail, "")
+}
+
+// DeleteFileLocalWithMessage removes a tracked file and creates a local commit when there is a change.
+func DeleteFileLocalWithMessage(root, branch, relPath, authorName, authorEmail, commitMessage string) error {
 	full := filepath.Join(root, relPath)
 	if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -306,7 +325,10 @@ func DeleteFileLocal(root, branch, relPath, authorName, authorEmail string) erro
 	if status.IsClean() {
 		return nil
 	}
-	msg := fmt.Sprintf("wiki: remove %s", relPath)
+	msg := strings.TrimSpace(commitMessage)
+	if msg == "" {
+		msg = fmt.Sprintf("wiki: remove %s", relPath)
+	}
 	_, err = w.Commit(msg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  authorName,
@@ -414,6 +436,53 @@ func EnsureSpaceMeta(root, spaceID string) error {
 // ReadFile reads a path under repo root.
 func ReadFile(root, relPath string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(root, relPath))
+}
+
+// ReadFileAtCommit reads a repository-relative file as of the provided commit.
+func ReadFileAtCommit(root, commit, relPath string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "show", fmt.Sprintf("%s:%s", commit, relPath))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, errors.New(msg)
+	}
+	return out, nil
+}
+
+// HeadCommit returns the full HEAD commit for the repository.
+func HeadCommit(root string) (string, error) {
+	return gitRevParse(root, "HEAD")
+}
+
+// LastCommitForPath returns the last commit touching the repository-relative path, or HEAD if none exist yet.
+func LastCommitForPath(root, relPath string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "log", "-n", "1", "--format=%H", "--", relPath)
+	out, err := cmd.Output()
+	if err == nil {
+		if got := strings.TrimSpace(string(out)); got != "" {
+			return got, nil
+		}
+	}
+	return HeadCommit(root)
+}
+
+// EncodeBytesBase64 returns standard base64 for transport/storage convenience.
+func EncodeBytesBase64(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+// DecodeBytesBase64 decodes standard base64 text.
+func DecodeBytesBase64(s string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(s))
 }
 
 func gitPushCLI(root, authUser, token, branch string) error {

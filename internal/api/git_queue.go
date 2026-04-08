@@ -27,8 +27,10 @@ type gitWriteJob struct {
 	Branch      string   `json:"branch"`
 	Path        string   `json:"path,omitempty"`
 	Content     string   `json:"content,omitempty"`
+	ContentB64  string   `json:"content_b64,omitempty"`
 	FromPath    string   `json:"from_path,omitempty"`
 	ToPath      string   `json:"to_path,omitempty"`
+	CommitMsg   string   `json:"commit_msg,omitempty"`
 	AuthorName  string   `json:"author_name"`
 	AuthorEmail string   `json:"author_email"`
 	PushUser    string   `json:"push_user"`
@@ -162,7 +164,15 @@ func (s *Server) executeWithRedisGitLock(ctx context.Context, job gitWriteJob) (
 func runGitWriteJob(job gitWriteJob) gitWriteResult {
 	switch job.Op {
 	case "save":
-		if err := gitops.WritePageLocal(job.RepoRoot, job.Branch, job.Path, job.Content, job.AuthorName, job.AuthorEmail, job.CoAuthors); err != nil {
+		content := []byte(job.Content)
+		if strings.TrimSpace(job.ContentB64) != "" {
+			decoded, err := gitops.DecodeBytesBase64(job.ContentB64)
+			if err != nil {
+				return gitWriteResult{OK: false, Error: err.Error()}
+			}
+			content = decoded
+		}
+		if err := gitops.WriteFileCommitLocal(job.RepoRoot, job.Branch, job.Path, content, job.AuthorName, job.AuthorEmail, job.CommitMsg, job.CoAuthors); err != nil {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
 		pushErr := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch)
@@ -190,7 +200,7 @@ func runGitWriteJob(job gitWriteJob) gitWriteResult {
 		return gitWriteResult{OK: true, Path: job.ToPath, Message: "Committed and pushed"}
 
 	case "delete":
-		if err := gitops.DeleteFileLocal(job.RepoRoot, job.Branch, job.Path, job.AuthorName, job.AuthorEmail); err != nil {
+		if err := gitops.DeleteFileLocalWithMessage(job.RepoRoot, job.Branch, job.Path, job.AuthorName, job.AuthorEmail, job.CommitMsg); err != nil {
 			return gitWriteResult{OK: false, Error: err.Error()}
 		}
 		if err := gitops.Push(job.RepoRoot, job.PushUser, job.PushToken, job.Branch); err != nil {

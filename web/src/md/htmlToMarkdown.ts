@@ -97,6 +97,29 @@ td.addRule("wikiCommentHighlight", {
   },
 });
 
+td.addRule("mdwikiDiagram", {
+  filter(node) {
+    return node instanceof HTMLElement && node.tagName === "DIV" && node.hasAttribute("data-mdwiki-diagram");
+  },
+  replacement(_content, node) {
+    const el = node as HTMLElement;
+    const path = (el.getAttribute("data-mdwiki-diagram") || "").trim();
+    const kind = (el.getAttribute("data-mdwiki-kind") || "").trim();
+    const name = (el.getAttribute("data-mdwiki-name") || "").trim();
+    if (!path) {
+      return "";
+    }
+    const attrs = [
+      `data-mdwiki-diagram=\"${path.replace(/\"/g, "&quot;")}\"`,
+      kind ? `data-mdwiki-kind=\"${kind.replace(/\"/g, "&quot;")}\"` : "",
+      name ? `data-mdwiki-name=\"${name.replace(/\"/g, "&quot;")}\"` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return `\n<div ${attrs}>Diagram: ${name || path}</div>\n`;
+  },
+});
+
 export function htmlToMarkdown(html: string): string {
   const out = td.turndown(html).replace(/\n{3,}/g, "\n\n").trim();
   return out.length > 0 ? `${out}\n` : "";

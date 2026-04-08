@@ -2,6 +2,14 @@
 
 Git-backed wiki: **GFM** pages in git, **Yjs** realtime editing over **Go WebSockets**, optional **Redis** pub/sub for multi-instance, **SQLite FTS5** search, **GitHub OAuth**, per-thread comment JSON under `.mdwiki/comments/`.
 
+## Core Guidelines (Project Manifest)
+* Text should be captured in Markdown, with support for additional markup formats for all kind of expressions (image, diagrams, charts, etc.)
+* The server should save everything to git
+* Git files shoud be readable and navigable (md filenames, git directories, makedown text, git history for md files - should look clean and human readable)
+* UI should be feature rich and feel like a full wiki software environment.
+* Project should be enterprise ready (auth, permissions, backend scalability)
+* Should be based on the git-service for users and permissions and anything else (github at first but we can add gitlab or others next)
+
 ## Quick start
 
 ### API + UI together (recommended)

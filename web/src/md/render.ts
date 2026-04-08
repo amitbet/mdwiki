@@ -25,11 +25,18 @@ const processor = unified()
   .use(rehypeRaw)
   .use(rehypeSanitize, {
     ...defaultSchema,
-    tagNames: [...(defaultSchema.tagNames ?? []), "mark"],
+    tagNames: [...(defaultSchema.tagNames ?? []), "mark", "div"],
     attributes: {
       ...(defaultSchema.attributes ?? {}),
       pre: [...(((defaultSchema.attributes ?? {}).pre as any[]) ?? []), "className"],
       code: [...(((defaultSchema.attributes ?? {}).code as any[]) ?? []), "className"],
+      div: [
+        ...(((defaultSchema.attributes ?? {}).div as any[]) ?? []),
+        "className",
+        ["data-mdwiki-diagram", /^.+$/],
+        ["data-mdwiki-kind", /^(excalidraw|drawio)$/],
+        ["data-mdwiki-name", /^.+$/],
+      ],
       mark: [
         ...(((defaultSchema.attributes ?? {}).mark as any[]) ?? []),
         "className",
