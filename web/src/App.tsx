@@ -280,6 +280,31 @@ export default function App() {
   }, [loadSpaces, session, setup]);
 
   useEffect(() => {
+    if (!session || !setup?.configured) {
+      return;
+    }
+    const wsUrl = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?watch=1&space=${encodeURIComponent("__global__")}`;
+    const ws = new WebSocket(wsUrl);
+    ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        return;
+      }
+      let ctrl: { type?: string };
+      try {
+        ctrl = JSON.parse(String(ev.data));
+      } catch {
+        return;
+      }
+      if (ctrl.type === "spaces_invalidated") {
+        void loadSpaces();
+      }
+    };
+    return () => {
+      ws.close();
+    };
+  }, [loadSpaces, session, setup]);
+
+  useEffect(() => {
     if (!spaces || spaces.length === 0) return;
     if (!spaces.some((s) => s.key === space)) {
       setSpace(spaces[0].key);
@@ -420,6 +445,7 @@ export default function App() {
 
   return (
     <WikiEditor
+      key={`${space}:${path}`}
       spaces={spaces}
       space={space}
       onSpaceChange={(k) => {

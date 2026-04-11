@@ -18,6 +18,7 @@ import (
 
 	"mdwiki/internal/appsettings"
 	"mdwiki/internal/gitops"
+	wshub "mdwiki/internal/ws"
 )
 
 var keyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]*$`)
@@ -423,6 +424,7 @@ func (s *Server) createSpace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.Hub.BroadcastControlAll(wshub.Control{Type: wshub.MsgSpacesInvalidated})
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "space": entry, "settings": cfg})
 }
 
@@ -472,6 +474,7 @@ func (s *Server) renameSpace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.Hub.BroadcastControlAll(wshub.Control{Type: wshub.MsgSpacesInvalidated})
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "space": cfg.Spaces[idx], "settings": cfg})
 }
 
@@ -515,6 +518,7 @@ func (s *Server) deleteSpace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.Hub.BroadcastControlAll(wshub.Control{Type: wshub.MsgSpacesInvalidated})
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "settings": cfg})
 }
 

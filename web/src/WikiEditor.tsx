@@ -130,6 +130,16 @@ type DiagramEditorState = {
   content: string;
 };
 
+type PendingNavigation =
+  | { kind: "path"; value: string }
+  | { kind: "space"; value: string }
+  | null;
+
+type RefreshPrompt = {
+  path: string;
+  commit?: string;
+} | null;
+
 const DEFAULT_PAGE_TEXT = "# New Page\n\nStart writing here.\n";
 const CODE_LANGUAGES = [
   "plaintext",
@@ -237,6 +247,18 @@ function firstPagePath(nodes: PageTreeNode[]): string | null {
     }
   }
   return null;
+}
+
+function treeHasPagePath(nodes: PageTreeNode[], targetPath: string): boolean {
+  for (const node of nodes) {
+    if (node.type === "page" && node.path === targetPath) {
+      return true;
+    }
+    if (node.children && treeHasPagePath(node.children, targetPath)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function mergePageAndFolderSiblings(nodes: PageTreeNode[]): PageTreeNode[] {
@@ -524,7 +546,12 @@ export default function WikiEditor({
   const [baseCommit, setBaseCommit] = useState("");
   const [compareDraftOpen, setCompareDraftOpen] = useState(false);
   const [diagramEditor, setDiagramEditor] = useState<DiagramEditorState | null>(null);
+  const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation>(null);
+  const [navigationDecisionBusy, setNavigationDecisionBusy] = useState<"save" | "discard" | null>(null);
+  const [refreshPrompt, setRefreshPrompt] = useState<RefreshPrompt>(null);
+  const [editorSession, setEditorSession] = useState(0);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const codeLangHoverRef = useRef(false);
   const popoverHoverRef = useRef(false);
   const lastSavedMarkdownRef = useRef("");
   const applyingRemoteSyncRef = useRef(false);
@@ -534,12 +561,13 @@ export default function WikiEditor({
   const wsReconnectAttemptsRef = useRef(0);
   const dirtyRef = useRef(false);
   const isEditingRef = useRef(isEditing);
+  const markdownRef = useRef(markdown);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [wsReconnectTick, setWsReconnectTick] = useState(0);
   const canEdit = isEditing && !readOnly;
   const canComment = !readOnly;
 
-  const ydoc = useMemo(() => new Y.Doc(), [space, path]);
+  const ydoc = useMemo(() => new Y.Doc(), [editorSession, space, path]);
   const CommentHighlight = useMemo(
     () =>
       Highlight.extend({
@@ -595,6 +623,7 @@ export default function WikiEditor({
       },
       onUpdate({ editor: ed }) {
         const next = htmlToMarkdown(ed.getHTML());
+        markdownRef.current = next;
         setMarkdown(next);
         if (applyingRemoteSyncRef.current || suppressDirtyTrackingRef.current || !isEditingRef.current) {
           return;
@@ -608,7 +637,7 @@ export default function WikiEditor({
   const commitCurrentState = useCallback(async () => {
     const body = editor ? htmlToMarkdown(editor.getHTML()) : markdown;
     if (canonicalMarkdown(body) === canonicalMarkdown(lastSavedMarkdownRef.current)) {
-      return "";
+      return { message: "", commit: baseCommit };
     }
     const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/page`, {
       method: "POST",
@@ -623,11 +652,17 @@ export default function WikiEditor({
     if (!r.ok) {
       throw new Error(await readApiError(r, "save failed"));
     }
-    const j = (await r.json()) as { message?: string };
+    const j = (await r.json()) as { message?: string; commit?: string };
+    markdownRef.current = body;
     setMarkdown(body);
     lastSavedMarkdownRef.current = canonicalMarkdown(body);
-    return typeof j.message === "string" ? j.message : "";
-  }, [editor, markdown, path, space]);
+    const nextCommit = typeof j.commit === "string" ? j.commit : baseCommit;
+    setBaseCommit(nextCommit);
+    return {
+      message: typeof j.message === "string" ? j.message : "",
+      commit: nextCommit,
+    };
+  }, [baseCommit, editor, markdown, path, space]);
 
   useEffect(() => {
     if (error) {
@@ -638,6 +673,10 @@ export default function WikiEditor({
   useEffect(() => {
     dirtyRef.current = dirty;
   }, [dirty]);
+
+  useEffect(() => {
+    markdownRef.current = markdown;
+  }, [markdown]);
 
   useEffect(() => {
     isEditingRef.current = isEditing;
@@ -657,38 +696,45 @@ export default function WikiEditor({
     };
   }, []);
 
-  const confirmLeaveDirtyPage = useCallback(() => {
-    if (!dirtyRef.current) {
-      return true;
-    }
-    return window.confirm("You have unsaved changes on this page. Leave this page anyway?");
-  }, []);
+  const applyPendingNavigation = useCallback(
+    (target: Exclude<PendingNavigation, null>) => {
+      setPageContextMenu(null);
+      if (target.kind === "path") {
+        onPathChange(target.value);
+        return;
+      }
+      onSpaceChange(target.value);
+    },
+    [onPathChange, onSpaceChange],
+  );
+
+  const requestNavigation = useCallback(
+    (target: Exclude<PendingNavigation, null>) => {
+      const isSameTarget = target.kind === "path" ? target.value === path : target.value === space;
+      if (isSameTarget) {
+        return;
+      }
+      if (!dirtyRef.current) {
+        applyPendingNavigation(target);
+        return;
+      }
+      setPendingNavigation(target);
+    },
+    [applyPendingNavigation, path, space],
+  );
 
   const navigateToPath = useCallback(
     (nextPath: string) => {
-      if (nextPath === path) {
-        return;
-      }
-      if (!confirmLeaveDirtyPage()) {
-        return;
-      }
-      setPageContextMenu(null);
-      onPathChange(nextPath);
+      requestNavigation({ kind: "path", value: nextPath });
     },
-    [confirmLeaveDirtyPage, onPathChange, path],
+    [requestNavigation],
   );
 
   const navigateToSpace = useCallback(
     (nextSpace: string) => {
-      if (nextSpace === space) {
-        return;
-      }
-      if (!confirmLeaveDirtyPage()) {
-        return;
-      }
-      onSpaceChange(nextSpace);
+      requestNavigation({ kind: "space", value: nextSpace });
     },
-    [confirmLeaveDirtyPage, onSpaceChange, space],
+    [requestNavigation],
   );
 
   const suppressDirtyTrackingForTick = useCallback(() => {
@@ -715,8 +761,9 @@ export default function WikiEditor({
         return;
       }
       const normalizedIncoming = canonicalMarkdown(md);
-      const normalizedCurrent = canonicalMarkdown(htmlToMarkdown(editor.getHTML()));
+      const normalizedCurrent = canonicalMarkdown(markdownRef.current);
       if (normalizedIncoming === normalizedCurrent && normalizedIncoming === canonicalMarkdown(lastSavedMarkdownRef.current)) {
+        markdownRef.current = md;
         setMarkdown(md);
         setDirty(false);
         return;
@@ -724,6 +771,7 @@ export default function WikiEditor({
       const html = await renderGFM(md);
       suppressDirtyTrackingForTick();
       lastSavedMarkdownRef.current = normalizedIncoming;
+      markdownRef.current = md;
       setMarkdown(md);
       setDirty(false);
       editor.commands.setContent(html, { emitUpdate: true });
@@ -737,13 +785,15 @@ export default function WikiEditor({
         return;
       }
       const html = await renderGFM(md);
+      const restoredDirty = canonicalMarkdown(md) !== canonicalMarkdown(lastSavedMarkdownRef.current);
       suppressDirtyTrackingForTick();
+      markdownRef.current = md;
+      isEditingRef.current = true;
+      dirtyRef.current = restoredDirty;
       setMarkdown(md);
       editor.commands.setContent(html, { emitUpdate: true });
       setIsEditing(true);
-      window.setTimeout(() => {
-        setDirty(canonicalMarkdown(md) !== canonicalMarkdown(lastSavedMarkdownRef.current));
-      }, 0);
+      setDirty(restoredDirty);
     },
     [editor, suppressDirtyTrackingForTick],
   );
@@ -879,10 +929,7 @@ export default function WikiEditor({
     setDraftInfo(null);
   }, [path, space]);
 
-  const seedFromHttp = useCallback(async () => {
-    if (!editor) {
-      return;
-    }
+  const refreshPageFromHttp = useCallback(async () => {
     const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/page?path=${encodeURIComponent(path)}`, {
       credentials: "include",
     });
@@ -891,15 +938,80 @@ export default function WikiEditor({
     }
     const j = (await r.json()) as { content?: string; base_commit?: string };
     const md = typeof j.content === "string" ? j.content : DEFAULT_PAGE_TEXT;
+    const normalized = canonicalMarkdown(md);
     setBaseCommit(typeof j.base_commit === "string" ? j.base_commit : "");
-    await applyTrustedMarkdown(md);
-  }, [applyTrustedMarkdown, editor, path, space, ydoc]);
+    if (editor) {
+      await applyTrustedMarkdown(md);
+    } else {
+      markdownRef.current = md;
+      lastSavedMarkdownRef.current = normalized;
+      setMarkdown(md);
+      setDirty(false);
+    }
+  }, [applyTrustedMarkdown, editor, path, space]);
+
+  const refreshViewerFromLatest = useCallback(async () => {
+    setError(null);
+    try {
+      await refreshPageFromHttp();
+      await loadComments();
+      setRefreshPrompt(null);
+      setStatus(`Loaded latest saved version ${new Date().toLocaleTimeString()}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to refresh page");
+    }
+  }, [loadComments, refreshPageFromHttp]);
+
+  const checkForSavedPageUpdate = useCallback(async () => {
+    if (isEditingRef.current || dirtyRef.current) {
+      return;
+    }
+    try {
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/page?path=${encodeURIComponent(path)}`, {
+        credentials: "include",
+      });
+      if (!r.ok) {
+        return;
+      }
+      const j = (await r.json()) as { content?: string; base_commit?: string };
+      const nextCommit = typeof j.base_commit === "string" ? j.base_commit : "";
+      const nextContent = typeof j.content === "string" ? j.content : DEFAULT_PAGE_TEXT;
+      const savedMarkdown = canonicalMarkdown(lastSavedMarkdownRef.current);
+      const incomingMarkdown = canonicalMarkdown(nextContent);
+      const hasNewSavedVersion =
+        (nextCommit !== "" && nextCommit !== baseCommit) || (nextCommit === "" && incomingMarkdown !== savedMarkdown);
+      if (hasNewSavedVersion) {
+        setRefreshPrompt({ path, commit: nextCommit });
+      }
+    } catch {
+      // Keep showing the current saved snapshot if the background check fails.
+    }
+  }, [baseCommit, path, space]);
 
   useEffect(() => {
     void loadTree();
     void loadComments();
     void loadDraft();
   }, [loadComments, loadDraft, loadTree]);
+
+  useEffect(() => {
+    if (isEditing) {
+      return;
+    }
+    void refreshPageFromHttp();
+  }, [isEditing, refreshPageFromHttp]);
+
+  useEffect(() => {
+    if (!editor || isEditing) {
+      return;
+    }
+    const desired = canonicalMarkdown(markdownRef.current);
+    const current = canonicalMarkdown(htmlToMarkdown(editor.getHTML()));
+    if (desired === current) {
+      return;
+    }
+    void applyTrustedMarkdown(markdownRef.current);
+  }, [applyTrustedMarkdown, editor, isEditing, path, space]);
 
   useEffect(() => {
     const onFocus = () => {
@@ -932,7 +1044,9 @@ export default function WikiEditor({
   }, [settingsInfo]);
 
   useEffect(() => {
-    if (!editor) {
+    if (!editor || !isEditing) {
+      setReadOnly(false);
+      setSyncMsg("");
       return;
     }
     let cancelled = false;
@@ -958,7 +1072,7 @@ export default function WikiEditor({
       if (options?.awaitingPeerSyncFallback) {
         httpSeededWhileAwaitingPeerSync = true;
       }
-      void seedFromHttp();
+      void refreshPageFromHttp();
     };
 
     const wsUrl = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?space=${encodeURIComponent(space)}&page=${encodeURIComponent(path)}`;
@@ -1018,7 +1132,7 @@ export default function WikiEditor({
         return;
       }
 
-      let ctrl: { type?: string; reason?: string; for_client?: string };
+      let ctrl: { type?: string; reason?: string; for_client?: string; path?: string; commit?: string };
       try {
         ctrl = JSON.parse(String(ev.data));
       } catch {
@@ -1035,6 +1149,12 @@ export default function WikiEditor({
       }
       if (ctrl.type === "pages_invalidated") {
         void loadTree();
+        return;
+      }
+      if (ctrl.type === "page_saved") {
+        if (!isEditingRef.current && ctrl.path === path) {
+          setRefreshPrompt({ path: ctrl.path, commit: ctrl.commit });
+        }
         return;
       }
 
@@ -1135,7 +1255,52 @@ export default function WikiEditor({
       ydoc.off("update", updateHandler);
       ws.close();
     };
-  }, [editor, loadComments, loadTree, path, seedFromHttp, space, suppressDirtyTrackingForTick, wsReconnectTick, ydoc]);
+  }, [editor, isEditing, loadComments, loadTree, path, refreshPageFromHttp, space, suppressDirtyTrackingForTick, wsReconnectTick, ydoc]);
+
+  useEffect(() => {
+    if (isEditing) {
+      return;
+    }
+    const wsUrl = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?watch=1&space=${encodeURIComponent(space)}`;
+    const ws = new WebSocket(wsUrl);
+    ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        return;
+      }
+      let ctrl: { type?: string; path?: string; commit?: string };
+      try {
+        ctrl = JSON.parse(String(ev.data));
+      } catch {
+        return;
+      }
+      if (ctrl.type === "pages_invalidated") {
+        void loadTree().then((nextTree) => {
+          if (!treeHasPagePath(nextTree, path)) {
+            setRefreshPrompt({ path, commit: ctrl.commit });
+          }
+        });
+        return;
+      }
+      if (ctrl.type === "page_saved" && ctrl.path === path) {
+        setRefreshPrompt({ path: ctrl.path, commit: ctrl.commit });
+      }
+    };
+    const onFocus = () => {
+      void checkForSavedPageUpdate();
+    };
+    const onVisibility = () => {
+      if (!document.hidden) {
+        void checkForSavedPageUpdate();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      ws.close();
+    };
+  }, [checkForSavedPageUpdate, isEditing, loadTree, path, space]);
 
   const save = useCallback(async () => {
     if (!dirty) {
@@ -1145,8 +1310,8 @@ export default function WikiEditor({
     setError(null);
     setStatus("");
     try {
-      const message = await commitCurrentState();
-      const normalized = normalizeApiErrorMessage(message);
+      const result = await commitCurrentState();
+      const normalized = normalizeApiErrorMessage(result.message);
       if (normalized.toLowerCase().includes("push failed")) {
         setError(normalized);
         setStatus(`Saved locally ${new Date().toLocaleTimeString()}`);
@@ -1173,11 +1338,33 @@ export default function WikiEditor({
   }, [commitCurrentState, consecutiveSaveFailures, discardDraft, loadComments, loadTree]);
 
   useEffect(() => {
+    const onSaveShortcut = (e: KeyboardEvent) => {
+      const isSaveKey = e.key.toLowerCase() === "s";
+      if (!isSaveKey || (!e.metaKey && !e.ctrlKey)) {
+        return;
+      }
+      if (!isEditingRef.current || readOnly || saving || !dirtyRef.current) {
+        return;
+      }
+      e.preventDefault();
+      void save();
+    };
+    window.addEventListener("keydown", onSaveShortcut);
+    return () => {
+      window.removeEventListener("keydown", onSaveShortcut);
+    };
+  }, [readOnly, save, saving]);
+
+  useEffect(() => {
     setDirty(false);
     setIsEditing(false);
+    markdownRef.current = DEFAULT_PAGE_TEXT;
     lastSavedMarkdownRef.current = "";
     setDraftInfo(null);
     setBaseCommit("");
+    setPendingNavigation(null);
+    setNavigationDecisionBusy(null);
+    setRefreshPrompt(null);
   }, [space, path]);
 
   useEffect(() => {
@@ -1213,8 +1400,47 @@ export default function WikiEditor({
       setIsEditing(false);
       return;
     }
+    setRefreshPrompt(null);
+    setEditorSession((n) => n + 1);
     setIsEditing(true);
   }, [consecutiveSaveFailures, isEditing, save, saving]);
+
+  const cancelPendingNavigation = useCallback(() => {
+    if (navigationDecisionBusy) {
+      return;
+    }
+    setPendingNavigation(null);
+  }, [navigationDecisionBusy]);
+
+  const saveAndContinueNavigation = useCallback(async () => {
+    if (!pendingNavigation || navigationDecisionBusy) {
+      return;
+    }
+    setNavigationDecisionBusy("save");
+    try {
+      await save();
+      if (dirtyRef.current) {
+        return;
+      }
+      applyPendingNavigation(pendingNavigation);
+    } finally {
+      setNavigationDecisionBusy(null);
+    }
+  }, [applyPendingNavigation, navigationDecisionBusy, pendingNavigation, save]);
+
+  const discardAndContinueNavigation = useCallback(async () => {
+    if (!pendingNavigation || navigationDecisionBusy) {
+      return;
+    }
+    setNavigationDecisionBusy("discard");
+    try {
+      await discardDraft().catch(() => {});
+      setDraftInfo(null);
+      applyPendingNavigation(pendingNavigation);
+    } finally {
+      setNavigationDecisionBusy(null);
+    }
+  }, [applyPendingNavigation, discardDraft, navigationDecisionBusy, pendingNavigation]);
 
   const selectedSpace = useMemo(() => spaces.find((s) => s.key === space) ?? null, [space, spaces]);
   const isSpaceCreator = useMemo(() => {
@@ -1492,9 +1718,6 @@ export default function WikiEditor({
 
   const deletePage = useCallback(
     async (pagePath: string) => {
-      if (!isSpaceCreator) {
-        return;
-      }
       const confirmed = window.confirm(`Delete page "${pageTitle(pagePath)}"? This cannot be undone.`);
       if (!confirmed) {
         setPageContextMenu(null);
@@ -1524,14 +1747,11 @@ export default function WikiEditor({
         setPageContextMenu(null);
       }
     },
-    [isSpaceCreator, loadComments, loadTree, onPathChange, path, space],
+    [loadComments, loadTree, onPathChange, path, space],
   );
 
   const renamePageAtPath = useCallback(
     async (fromPath: string) => {
-      if (!isSpaceCreator) {
-        return;
-      }
       const nextPathInput = window.prompt("Rename page to (relative .md path)", fromPath);
       if (!nextPathInput) {
         setPageContextMenu(null);
@@ -1572,7 +1792,7 @@ export default function WikiEditor({
         setPageContextMenu(null);
       }
     },
-    [commitCurrentState, dirty, isSpaceCreator, loadComments, loadTree, onPathChange, path, space],
+    [commitCurrentState, dirty, loadComments, loadTree, onPathChange, path, space],
   );
 
   const insertLink = useCallback(() => {
@@ -2159,147 +2379,179 @@ export default function WikiEditor({
             </button>
           </div>
 
-          {draftBannerInfo ? (
-            <div className="draft-banner">
-              <div>
-                Unsaved draft found{draftBannerInfo.updated_at ? ` from ${new Date(draftBannerInfo.updated_at).toLocaleString()}` : ""}.
-                {draftBannerInfo.base_changed ? " This page changed since the draft was created." : ""}
-              </div>
-              <div className="draft-banner-actions">
-                <button type="button" onClick={() => void restoreDraft()}>
-                  Restore
-                </button>
-                <button type="button" onClick={() => setCompareDraftOpen(true)}>
-                  Compare
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void discardDraft().catch((e) => setError(e instanceof Error ? e.message : "draft delete failed"));
-                  }}
-                >
-                  Discard
-                </button>
-              </div>
-            </div>
-          ) : null}
-
-          <div
-            className="editor-container"
-            onMouseMove={(e) => {
-              const target = e.target as HTMLElement | null;
-              const pre = target?.closest("pre") as HTMLElement | null;
-              if (pre) {
-                const info = findCodeBlockAtDOM(pre);
-                if (info) {
-                  const rect = pre.getBoundingClientRect();
-                  setCodeLangHover({
-                    x: rect.right - 184,
-                    y: rect.top + 8,
-                    pos: info.pos,
-                    language: info.language || "plaintext",
-                  });
-                }
-              } else {
-                setCodeLangHover(null);
-              }
-              const mark = target?.closest("mark[data-wiki-comment]") as HTMLElement | null;
-              if (!mark) {
-                scheduleHidePopover();
-                return;
-              }
-              const anchorId = commentAnchorIdFromElement(mark);
-              if (!anchorId || !threadsByAnchor[anchorId]) {
-                scheduleHidePopover();
-                return;
-              }
-              if (hideTimerRef.current) {
-                clearTimeout(hideTimerRef.current);
-              }
-              const rect = mark.getBoundingClientRect();
-              setPopover({ anchorId, x: rect.left, y: rect.bottom + 8 });
-            }}
-            onMouseLeave={() => {
-              setCodeLangHover(null);
-              scheduleHidePopover();
-            }}
-            onContextMenu={(e) => {
-              if (!editor || !canComment) {
-                return;
-              }
-              e.preventDefault();
-              const sel = editor.state.selection;
-              setContextMenu({
-                x: e.clientX,
-                y: e.clientY,
-                from: Math.min(sel.from, sel.to),
-                to: Math.max(sel.from, sel.to),
-              });
-            }}
-            onClick={(e) => {
-              const target = e.target as HTMLElement | null;
-              const actionEl = target?.closest("[data-diagram-action]") as HTMLElement | null;
-              if (actionEl) {
-                e.preventDefault();
-                e.stopPropagation();
-                const diagramPath = (actionEl.getAttribute("data-diagram-path") || "").trim();
-                const action = (actionEl.getAttribute("data-diagram-action") || "").trim();
-                if (diagramPath && action === "edit") {
-                  void openDiagramEditor(diagramPath).catch((err) => setError(err instanceof Error ? err.message : "diagram load failed"));
-                  return;
-                }
-                if (diagramPath && action === "open") {
-                  window.open(assetApiURL(space, diagramPath), "_blank", "noopener,noreferrer");
-                  return;
-                }
-              }
-              setContextMenu(null);
-            }}
-          >
-            <input
-              ref={imageInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden-file-input"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                e.currentTarget.value = "";
-                if (!file) {
-                  return;
-                }
-                void uploadImageAndInsert(file).catch((err) => setError(err instanceof Error ? err.message : "image upload failed"));
-              }}
-            />
-            <EditorContent editor={editor} />
-            <DiagramPreview active={!isEditing} contentKey={markdown} theme={theme} />
-            {codeLangHover ? (
-              <div className="code-lang-pop" style={{ left: codeLangHover.x, top: codeLangHover.y }}>
-                <span className="code-lang-label">Language</span>
-                <select
-                  value={codeLangHover.language || "plaintext"}
-                  disabled={!canEdit}
-                  onChange={(e) => {
-                    if (!editor || !codeLangHover || !canEdit) {
-                      return;
-                    }
-                    const lang = e.target.value;
-                    editor
-                      .chain()
-                      .focus()
-                      .setTextSelection(codeLangHover.pos + 1)
-                      .updateAttributes("codeBlock", { language: lang })
-                      .run();
-                    setCodeLangHover((prev) => (prev ? { ...prev, language: lang } : prev));
-                  }}
-                >
-                  {CODE_LANGUAGES.map((lang) => (
-                    <option key={lang} value={lang}>
-                      {lang}
-                    </option>
-                  ))}
-                </select>
+          <div className="editor-main">
+            {!isEditing && refreshPrompt ? (
+              <div className="draft-banner refresh-banner">
+                <div>A newer saved version of this page is available.</div>
+                <div className="draft-banner-actions">
+                  <button type="button" onClick={() => setRefreshPrompt(null)}>
+                    Later
+                  </button>
+                  <button type="button" onClick={() => void refreshViewerFromLatest()}>
+                    Refresh
+                  </button>
+                </div>
               </div>
             ) : null}
+
+            {draftBannerInfo ? (
+              <div className="draft-banner">
+                <div>
+                  Unsaved draft found{draftBannerInfo.updated_at ? ` from ${new Date(draftBannerInfo.updated_at).toLocaleString()}` : ""}.
+                  {draftBannerInfo.base_changed ? " This page changed since the draft was created." : ""}
+                </div>
+                <div className="draft-banner-actions">
+                  <button type="button" onClick={() => void restoreDraft()}>
+                    Restore
+                  </button>
+                  <button type="button" onClick={() => setCompareDraftOpen(true)}>
+                    Compare
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void discardDraft().catch((e) => setError(e instanceof Error ? e.message : "draft delete failed"));
+                    }}
+                  >
+                    Discard
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div
+              className="editor-container"
+              onMouseMove={(e) => {
+                const target = e.target as HTMLElement | null;
+                if (target?.closest(".code-lang-pop")) {
+                  return;
+                }
+                const pre = target?.closest("pre") as HTMLElement | null;
+                if (pre) {
+                  const info = findCodeBlockAtDOM(pre);
+                  if (info) {
+                    const rect = pre.getBoundingClientRect();
+                    codeLangHoverRef.current = true;
+                    setCodeLangHover({
+                      x: rect.right - 184,
+                      y: rect.top + 8,
+                      pos: info.pos,
+                      language: info.language || "plaintext",
+                    });
+                  }
+                } else {
+                  codeLangHoverRef.current = false;
+                  setCodeLangHover(null);
+                }
+                const mark = target?.closest("mark[data-wiki-comment]") as HTMLElement | null;
+                if (!mark) {
+                  scheduleHidePopover();
+                  return;
+                }
+                const anchorId = commentAnchorIdFromElement(mark);
+                if (!anchorId || !threadsByAnchor[anchorId]) {
+                  scheduleHidePopover();
+                  return;
+                }
+                if (hideTimerRef.current) {
+                  clearTimeout(hideTimerRef.current);
+                }
+                const rect = mark.getBoundingClientRect();
+                setPopover({ anchorId, x: rect.left, y: rect.bottom + 8 });
+              }}
+              onMouseLeave={() => {
+                codeLangHoverRef.current = false;
+                setCodeLangHover(null);
+                scheduleHidePopover();
+              }}
+              onContextMenu={(e) => {
+                if (!editor || !canComment) {
+                  return;
+                }
+                e.preventDefault();
+                const sel = editor.state.selection;
+                setContextMenu({
+                  x: e.clientX,
+                  y: e.clientY,
+                  from: Math.min(sel.from, sel.to),
+                  to: Math.max(sel.from, sel.to),
+                });
+              }}
+              onClick={(e) => {
+                const target = e.target as HTMLElement | null;
+                const actionEl = target?.closest("[data-diagram-action]") as HTMLElement | null;
+                if (actionEl) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const diagramPath = (actionEl.getAttribute("data-diagram-path") || "").trim();
+                  const action = (actionEl.getAttribute("data-diagram-action") || "").trim();
+                  if (diagramPath && action === "edit") {
+                    void openDiagramEditor(diagramPath).catch((err) => setError(err instanceof Error ? err.message : "diagram load failed"));
+                    return;
+                  }
+                  if (diagramPath && action === "open") {
+                    window.open(assetApiURL(space, diagramPath), "_blank", "noopener,noreferrer");
+                    return;
+                  }
+                }
+                setContextMenu(null);
+              }}
+            >
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden-file-input"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.currentTarget.value = "";
+                  if (!file) {
+                    return;
+                  }
+                  void uploadImageAndInsert(file).catch((err) => setError(err instanceof Error ? err.message : "image upload failed"));
+                }}
+              />
+              <EditorContent editor={editor} />
+              <DiagramPreview active={!isEditing} contentKey={markdown} theme={theme} />
+              {codeLangHover ? (
+                <div
+                  className="code-lang-pop"
+                  style={{ left: codeLangHover.x, top: codeLangHover.y }}
+                  onMouseEnter={() => {
+                    codeLangHoverRef.current = true;
+                  }}
+                  onMouseLeave={() => {
+                    codeLangHoverRef.current = false;
+                    setCodeLangHover(null);
+                  }}
+                >
+                  <span className="code-lang-label">Language</span>
+                  <select
+                    value={codeLangHover.language || "plaintext"}
+                    disabled={!canEdit}
+                    onChange={(e) => {
+                      if (!editor || !codeLangHover || !canEdit) {
+                        return;
+                      }
+                      const lang = e.target.value;
+                      editor
+                        .chain()
+                        .focus()
+                        .setTextSelection(codeLangHover.pos + 1)
+                        .updateAttributes("codeBlock", { language: lang })
+                        .run();
+                      setCodeLangHover((prev) => (prev ? { ...prev, language: lang } : prev));
+                    }}
+                  >
+                    {CODE_LANGUAGES.map((lang) => (
+                      <option key={lang} value={lang}>
+                        {lang}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : null}
+            </div>
           </div>
 
           {contextMenu ? (
@@ -2318,18 +2570,16 @@ export default function WikiEditor({
             >
               <button
                 type="button"
-                title={isSpaceCreator ? "Rename page" : "Only the space creator can rename pages"}
+                title="Rename page"
                 onClick={() => void renamePageAtPath(pageContextMenu.pagePath)}
-                disabled={!isSpaceCreator}
               >
                 Rename
               </button>
               <button
                 type="button"
                 className="danger-menu-item"
-                title={isSpaceCreator ? "Delete page" : "Only the space creator can delete pages"}
+                title="Delete page"
                 onClick={() => void deletePage(pageContextMenu.pagePath)}
-                disabled={!isSpaceCreator}
               >
                 Delete
               </button>
@@ -2621,6 +2871,39 @@ export default function WikiEditor({
                       Create
                     </button>
                   </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {pendingNavigation ? (
+            <div className="settings-backdrop" onClick={() => void cancelPendingNavigation()}>
+              <div className="settings-modal unsaved-navigation-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="settings-header">
+                  <strong>Unsaved changes</strong>
+                  <button
+                    type="button"
+                    className="top-icon-btn"
+                    onClick={() => void cancelPendingNavigation()}
+                    title="Close"
+                    disabled={navigationDecisionBusy !== null}
+                  >
+                    x
+                  </button>
+                </div>
+                <div className="unsaved-navigation-copy">
+                  You have unsaved changes on this page. Save them before switching {pendingNavigation.kind === "space" ? "spaces" : "pages"}?
+                </div>
+                <div className="settings-inline">
+                  <button type="button" onClick={() => void cancelPendingNavigation()} disabled={navigationDecisionBusy !== null}>
+                    Cancel
+                  </button>
+                  <button type="button" onClick={() => void discardAndContinueNavigation()} disabled={navigationDecisionBusy !== null}>
+                    {navigationDecisionBusy === "discard" ? "Discarding…" : "Discard"}
+                  </button>
+                  <button type="button" onClick={() => void saveAndContinueNavigation()} disabled={navigationDecisionBusy !== null || saving}>
+                    {navigationDecisionBusy === "save" || saving ? "Saving…" : "Save"}
+                  </button>
                 </div>
               </div>
             </div>

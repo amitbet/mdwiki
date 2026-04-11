@@ -471,10 +471,15 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 		}
 		commit = res.Commit
 		msg = res.Message
-		if clearErr := s.deleteDraftForPath(r.Context(), r, spaceKey, root, ent.Branch, body.Path); clearErr != nil {
-			log.Printf("draft clear after page save failed: space=%s path=%s err=%v", spaceKey, body.Path, clearErr)
-		}
 	}
+	if clearErr := s.deleteDraftForPath(r.Context(), r, spaceKey, root, ent.Branch, body.Path); clearErr != nil {
+		log.Printf("draft clear after page save failed: space=%s path=%s err=%v", spaceKey, body.Path, clearErr)
+	}
+	s.Hub.BroadcastControlToSpace(spaceKey, wshub.Control{
+		Type:   wshub.MsgPageSaved,
+		Path:   body.Path,
+		Commit: commit,
+	})
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":           true,
@@ -655,7 +660,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.Sessions.Get(sid)
 	spaceKey := r.URL.Query().Get("space")
 	pagePath := r.URL.Query().Get("page")
-	if spaceKey == "" || pagePath == "" {
+	watchOnly := strings.TrimSpace(r.URL.Query().Get("watch")) == "1"
+	if spaceKey == "" {
+		http.Error(w, "space required", http.StatusBadRequest)
+		return
+	}
+	if !watchOnly && pagePath == "" {
 		http.Error(w, "space and page required", http.StatusBadRequest)
 		return
 	}
@@ -664,6 +674,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	room := spaceKey + ":" + pagePath
+	if watchOnly {
+		room = spaceKey + ":__watch__"
+	}
 	userID := "local"
 	if ok && strings.TrimSpace(sess.Login) != "" {
 		userID = strings.TrimSpace(sess.Login)
@@ -676,6 +689,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		TextSend: make(chan []byte, 128),
 		Hub:      s.Hub,
 		UserID:   userID,
+		ControlOnly: watchOnly,
 	}
 	s.Hub.Register(cl)
 

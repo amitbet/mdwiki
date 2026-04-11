@@ -27,6 +27,14 @@ function commentIdFromNode(node: HTMLElement): string {
   return "";
 }
 
+function escapeMarkdownImageAlt(text: string): string {
+  return text.replace(/[[\]\\]/g, "\\$&");
+}
+
+function escapeMarkdownDestination(url: string): string {
+  return url.replace(/>/g, "%3E");
+}
+
 // Preserve underline markup as inline HTML.
 td.addRule("underline", {
   filter: ["u"],
@@ -117,6 +125,21 @@ td.addRule("mdwikiDiagram", {
       .filter(Boolean)
       .join(" ");
     return `\n<div ${attrs}>Diagram: ${name || path}</div>\n`;
+  },
+});
+
+td.addRule("imageWithSafeDestination", {
+  filter(node) {
+    return node instanceof HTMLElement && node.tagName === "IMG";
+  },
+  replacement(_content, node) {
+    const el = node as HTMLElement;
+    const src = (el.getAttribute("src") || "").trim();
+    if (!src) {
+      return "";
+    }
+    const alt = escapeMarkdownImageAlt((el.getAttribute("alt") || "").trim());
+    return `![${alt}](<${escapeMarkdownDestination(src)}>)`;
   },
 });
 

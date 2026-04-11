@@ -20,6 +20,8 @@ const (
 	MsgSyncFailedLock   = "sync_lock"         // server: read-only until peer sync
 	MsgSyncOK           = "sync_ok"           // server: editing allowed
 	MsgPagesInvalidated = "pages_invalidated" // page tree changed in this space
+	MsgSpacesInvalidated = "spaces_invalidated" // space list changed
+	MsgPageSaved        = "page_saved"        // saved git/local version available for a page
 )
 
 // Control JSON message.
@@ -30,6 +32,8 @@ type Control struct {
 	FromClient string `json:"from_client,omitempty"`
 	DataB64    string `json:"data_b64,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	Path       string `json:"path,omitempty"`
+	Commit     string `json:"commit,omitempty"`
 }
 
 // Client is one websocket connection.
@@ -42,6 +46,7 @@ type Client struct {
 	Hub      *Hub
 	UserID   string // optional session id for contributor tracking
 	ReadOnly bool
+	ControlOnly bool
 }
 
 // Hub routes Yjs updates and control messages per room.
@@ -90,6 +95,9 @@ func (h *Hub) Run() {
 			n := len(h.rooms[c.Room])
 			h.mu.Unlock()
 			log.Printf("ws: client %s joined room %s (%d peers)", c.ID, c.Room, n)
+			if c.ControlOnly {
+				continue
+			}
 			if n == 1 {
 				_ = c.Conn.WriteJSON(Control{Type: MsgSyncOK})
 				c.ReadOnly = false
@@ -140,6 +148,24 @@ func (h *Hub) Run() {
 			h.mu.RUnlock()
 			if h.redis != nil {
 				h.redis.Publish(b.room, b.data)
+			}
+		}
+	}
+}
+
+// BroadcastControlAll sends a JSON control message to every connected client.
+func (h *Hub) BroadcastControlAll(ctrl Control) {
+	data, err := MarshalControl(ctrl)
+	if err != nil {
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, clients := range h.rooms {
+		for cl := range clients {
+			select {
+			case cl.TextSend <- data:
+			default:
 			}
 		}
 	}

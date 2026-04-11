@@ -46,6 +46,22 @@ func sanitizeAssetName(raw string) string {
 	name = strings.ReplaceAll(name, "\\", "-")
 	name = strings.ReplaceAll(name, "/", "-")
 	name = strings.ReplaceAll(name, "..", "-")
+	name = strings.ReplaceAll(name, " ", "-")
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, name)
+	name = strings.Trim(name, "-")
 	if name == "" {
 		return "asset"
 	}
