@@ -2,6 +2,12 @@
 
 Git-backed wiki: **GFM** pages in git, **Yjs** realtime editing over **Go WebSockets**, optional **Redis** pub/sub for multi-instance, **SQLite FTS5** search, **GitHub OAuth**, per-thread comment JSON under `.mdwiki/comments/`.
 
+## Wiki In Action
+
+Collaborative editing, comments, diagrams, and media in a git-backed wiki UI:
+
+![mdwiki in action](docs/images/wiki-in-action.png)
+
 ## Core Guidelines (Project Manifest)
 * Text should be captured in Markdown, with support for additional markup formats for all kind of expressions (image, diagrams, charts, etc.)
 * The server should save everything to git

@@ -137,7 +137,7 @@ func (s *Server) uploadImageAsset(w http.ResponseWriter, r *http.Request) {
 	if filepath.Ext(name) == "" {
 		name += ".bin"
 	}
-	relPath := filepath.ToSlash(filepath.Join("assets", "images", fmt.Sprintf("%d-%s", time.Now().UnixNano(), name)))
+	relPath := filepath.ToSlash(filepath.Join(".mdwiki", "assets", "images", fmt.Sprintf("%d-%s", time.Now().UnixNano(), name)))
 	if err := s.writeAssetFile(r, root, ent.Branch, relPath, data, fmt.Sprintf("asset: upload %s", relPath)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -178,7 +178,7 @@ func (s *Server) createDiagram(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasSuffix(strings.ToLower(name), ext) {
 		name += ext
 	}
-	relPath := filepath.ToSlash(filepath.Join("assets", "diagrams", name))
+	relPath := filepath.ToSlash(filepath.Join(".mdwiki", "assets", "diagrams", name))
 	content := diagramTemplate(kind)
 	if err := s.writeAssetFile(r, root, ent.Branch, relPath, []byte(content), fmt.Sprintf("diagram: create %s", relPath)); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
