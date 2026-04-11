@@ -198,6 +198,52 @@ function escapeHTML(s: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function normalizeSlashPath(input: string): string {
+  const segments = input
+    .split("/")
+    .filter((part) => part !== "" && part !== ".");
+  const out: string[] = [];
+  for (const part of segments) {
+    if (part === "..") {
+      if (out.length > 0) {
+        out.pop();
+      }
+      continue;
+    }
+    out.push(part);
+  }
+  return out.join("/");
+}
+
+function pageDirectory(pagePath: string): string {
+  const normalized = pagePath.replace(/^\/+/, "");
+  const idx = normalized.lastIndexOf("/");
+  return idx >= 0 ? normalized.slice(0, idx) : "";
+}
+
+function relativizeAssetPath(pagePath: string, assetPath: string): string {
+  const assetParts = normalizeSlashPath(assetPath).split("/").filter(Boolean);
+  const pageDirParts = pageDirectory(pagePath).split("/").filter(Boolean);
+  let shared = 0;
+  while (shared < pageDirParts.length && shared < assetParts.length && pageDirParts[shared] === assetParts[shared]) {
+    shared += 1;
+  }
+  const upward = pageDirParts.slice(shared).map(() => "..");
+  const downward = assetParts.slice(shared);
+  return [...upward, ...downward].join("/") || assetParts.join("/");
+}
+
+function resolveAssetPath(pagePath: string, assetRef: string): string {
+  const trimmed = assetRef.trim().replace(/^\/+/, "");
+  if (trimmed === "") {
+    return "";
+  }
+  const combined = trimmed.startsWith(".mdwiki/") || trimmed.startsWith("assets/")
+    ? trimmed
+    : [pageDirectory(pagePath), trimmed].filter(Boolean).join("/");
+  return normalizeSlashPath(combined);
+}
+
 function assetApiURL(space: string, relPath: string): string {
   return `/api/spaces/${encodeURIComponent(space)}/asset?path=${encodeURIComponent(relPath)}`;
 }
@@ -1931,12 +1977,12 @@ export default function WikiEditor({
       if (!imagePath) {
         throw new Error("image upload did not return a path");
       }
-      editor.chain().focus().setImage({ src: imagePath, alt: file.name }).run();
+      editor.chain().focus().setImage({ src: relativizeAssetPath(path, imagePath), alt: file.name }).run();
       setDirty(true);
       setStatus(`Image inserted ${new Date().toLocaleTimeString()}`);
       await loadTree();
     },
-    [editor, loadTree, space],
+    [editor, loadTree, path, space],
   );
 
   const createDiagramAsset = useCallback(
@@ -1963,26 +2009,27 @@ export default function WikiEditor({
       if (!diagramPath) {
         throw new Error("diagram create did not return a path");
       }
-      editor.chain().focus().insertContent(diagramPlaceholderHTML(diagramPath)).run();
+      editor.chain().focus().insertContent(diagramPlaceholderHTML(relativizeAssetPath(path, diagramPath))).run();
       setDirty(true);
       setDiagramEditor({
-        path: diagramPath,
+        path: resolveAssetPath(path, diagramPath),
         kind,
         content: typeof j.content === "string" ? j.content : "",
       });
       setStatus(`Diagram created ${new Date().toLocaleTimeString()}`);
       await loadTree();
     },
-    [editor, loadTree, space],
+    [editor, loadTree, path, space],
   );
 
   const openDiagramEditor = useCallback(
     async (diagramPath: string) => {
-      const kind = diagramKindForPath(diagramPath);
+      const resolvedPath = resolveAssetPath(path, diagramPath);
+      const kind = diagramKindForPath(resolvedPath);
       if (!kind) {
         return;
       }
-      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/diagram?path=${encodeURIComponent(diagramPath)}`, {
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/diagram?path=${encodeURIComponent(resolvedPath)}`, {
         credentials: "include",
       });
       if (!r.ok) {
@@ -1990,12 +2037,12 @@ export default function WikiEditor({
       }
       const j = (await r.json()) as { content?: string };
       setDiagramEditor({
-        path: diagramPath,
+        path: resolvedPath,
         kind,
         content: typeof j.content === "string" ? j.content : "",
       });
     },
-    [space],
+    [path, space],
   );
 
   const saveDiagramEditor = useCallback(async () => {
@@ -2042,8 +2089,9 @@ export default function WikiEditor({
         if (!isRelativeAssetPath(original)) {
           return;
         }
+        const resolvedPath = resolveAssetPath(path, original);
         img.setAttribute("data-mdwiki-src", original);
-        img.setAttribute("src", assetApiURL(space, original));
+        img.setAttribute("src", assetApiURL(space, resolvedPath));
         img.classList.add("wiki-embedded-image");
       });
       root.querySelectorAll("a[href]").forEach((anchor) => {
@@ -2070,9 +2118,10 @@ export default function WikiEditor({
           return;
         }
         if (isRelativeAssetPath(href)) {
+          const resolvedPath = resolveAssetPath(path, href);
           anchor.setAttribute("target", "_blank");
           anchor.setAttribute("rel", "noreferrer noopener");
-          anchor.setAttribute("href", assetApiURL(space, href));
+          anchor.setAttribute("href", assetApiURL(space, resolvedPath));
         }
       });
     }, 60);
@@ -2490,7 +2539,7 @@ export default function WikiEditor({
                     return;
                   }
                   if (diagramPath && action === "open") {
-                    window.open(assetApiURL(space, diagramPath), "_blank", "noopener,noreferrer");
+                    window.open(assetApiURL(space, resolveAssetPath(path, diagramPath)), "_blank", "noopener,noreferrer");
                     return;
                   }
                 }
