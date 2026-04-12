@@ -85,7 +85,7 @@ If you want GitHub sign-in, create a GitHub OAuth App and copy its values into m
 
 Template values:
 
-- `<frontend-origin>`: where the UI is served, for example `http://localhost:3000`
+- `<frontend-origin>`: where the UI is served, for example `http://localhost:5173`
 - `<backend-origin>`: where the Go server is served, for example `http://localhost:8080`
 - OAuth callback/whitelist URL: `<backend-origin>/auth/github/callback`
 
@@ -98,6 +98,61 @@ export MDWIKI_GITHUB_CALLBACK=http://localhost:8080/auth/github/callback
 ```
 
 If mdwiki also needs to clone or push without a signed-in user, set `MDWIKI_SERVER_GIT_TOKEN` to a GitHub token with repo access.
+
+### Testing it out with a personal GitHub account
+
+For a quick local test, you can create the OAuth app in your own GitHub account. A free personal GitHub account is enough.
+
+1. Log in to GitHub with your personal account.
+2. Open **Settings** -> **Developer settings** -> **OAuth Apps** -> **New OAuth App**.
+3. Create an app with:
+   - **Application name**: `mdwiki local`
+   - **Homepage URL**: `http://localhost:5173`
+   - **Authorization callback URL**: `http://localhost:8080/auth/github/callback`
+4. Click **Register application**.
+5. On the app page:
+   - copy **Client ID** into `MDWIKI_GITHUB_CLIENT_ID`
+   - click **Generate a new client secret**
+   - copy that value into `MDWIKI_GITHUB_CLIENT_SECRET`
+6. Export the local env vars:
+
+```bash
+export MDWIKI_GITHUB_CLIENT_ID=...
+export MDWIKI_GITHUB_CLIENT_SECRET=...
+export MDWIKI_GITHUB_CALLBACK=http://localhost:8080/auth/github/callback
+```
+
+7. Put your GitHub client secret in `local.mk`:
+
+```make
+MDWIKI_GITHUB_CLIENT_SECRET ?= your-client-secret
+export MDWIKI_GITHUB_CLIENT_SECRET
+```
+
+8. Install local dependencies:
+
+```bash
+make install
+```
+
+9. Run everything on localhost:
+
+```bash
+make dev
+```
+
+This starts:
+
+- frontend at `http://localhost:5173`
+- backend at `http://localhost:8080`
+
+10. Open `http://localhost:5173`.
+11. Use the GitHub sign-in button. GitHub should redirect back to `http://localhost:8080/auth/github/callback`, and mdwiki should finish the login flow.
+
+If you run `make dev UI_PORT=3000 SERVER_PORT=9090`, use those same values in the GitHub OAuth app:
+
+- **Homepage URL**: `http://localhost:3000`
+- **Authorization callback URL**: `http://localhost:9090/auth/github/callback`
 
 ### Frontend only
 
