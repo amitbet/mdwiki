@@ -2779,42 +2779,46 @@ export default function WikiEditor({
           </div>
 
           <div className="editor-main">
-            {!isEditing && refreshPrompt ? (
-              <div className="draft-banner refresh-banner">
-                <div>A newer saved version of this page is available.</div>
-                <div className="draft-banner-actions">
-                  <button type="button" onClick={() => setRefreshPrompt(null)}>
-                    Later
-                  </button>
-                  <button type="button" onClick={() => void refreshViewerFromLatest()}>
-                    Refresh
-                  </button>
-                </div>
-              </div>
-            ) : null}
+            {((!isEditing && refreshPrompt) || draftBannerInfo) ? (
+              <div className="editor-banner-stack">
+                {!isEditing && refreshPrompt ? (
+                  <div className="draft-banner refresh-banner">
+                    <div>A newer saved version of this page is available.</div>
+                    <div className="draft-banner-actions">
+                      <button type="button" onClick={() => setRefreshPrompt(null)}>
+                        Later
+                      </button>
+                      <button type="button" onClick={() => void refreshViewerFromLatest()}>
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
 
-            {draftBannerInfo ? (
-              <div className="draft-banner">
-                <div>
-                  Unsaved draft found{draftBannerInfo.updated_at ? ` from ${new Date(draftBannerInfo.updated_at).toLocaleString()}` : ""}.
-                  {draftBannerInfo.base_changed ? " This page changed since the draft was created." : ""}
-                </div>
-                <div className="draft-banner-actions">
-                  <button type="button" onClick={() => void restoreDraft()}>
-                    Restore
-                  </button>
-                  <button type="button" onClick={() => setCompareDraftOpen(true)}>
-                    Compare
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void discardDraft().catch((e) => setError(e instanceof Error ? e.message : "draft delete failed"));
-                    }}
-                  >
-                    Discard
-                  </button>
-                </div>
+                {draftBannerInfo ? (
+                  <div className="draft-banner">
+                    <div>
+                      Unsaved draft found{draftBannerInfo.updated_at ? ` from ${new Date(draftBannerInfo.updated_at).toLocaleString()}` : ""}.
+                      {draftBannerInfo.base_changed ? " This page changed since the draft was created." : ""}
+                    </div>
+                    <div className="draft-banner-actions">
+                      <button type="button" onClick={() => void restoreDraft()}>
+                        Restore
+                      </button>
+                      <button type="button" onClick={() => setCompareDraftOpen(true)}>
+                        Compare
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void discardDraft().catch((e) => setError(e instanceof Error ? e.message : "draft delete failed"));
+                        }}
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ) : null}
 

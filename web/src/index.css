@@ -392,6 +392,18 @@ select {
   display: flex;
   flex-direction: column;
   flex: 1;
+  position: relative;
+}
+
+.editor-banner-stack {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 30;
+  width: min(520px, calc(100% - 24px));
+  display: grid;
+  gap: 10px;
+  pointer-events: none;
 }
 
 .editor-toolbar {
@@ -748,6 +760,12 @@ select {
   font-size: 0.9rem;
   line-height: 1.45;
   color: var(--text-muted);
+  box-shadow: 0 12px 28px rgba(9, 30, 66, 0.16);
+  pointer-events: auto;
+}
+
+.editor-banner-stack .draft-banner {
+  margin-bottom: 0;
 }
 
 .refresh-banner {
@@ -978,6 +996,12 @@ select {
 }
 
 @media (max-width: 960px) {
+  .editor-banner-stack {
+    left: 12px;
+    right: 12px;
+    width: auto;
+  }
+
   .wiki-body {
     grid-template-columns: 1fr;
   }
