@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -247,43 +246,33 @@ func TestSuggestedFirstSpacePath(t *testing.T) {
 	}
 }
 
-func TestSetupInitialSpaceChoosesPathByRepoShape(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "root")
-	store := &fakeSettingsStore{}
-	srv := newTestServer(t, store)
-
-	req := httptest.NewRequest(http.MethodPost, "/api/setup/init", strings.NewReader(
-		fmt.Sprintf(`{"root_repo_local_dir":%q,"first_space_key":"main","first_space_name":"Main Space"}`, root),
-	))
-	rr := httptest.NewRecorder()
-	srv.setupInitialSpace(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("setupInitialSpace empty repo status = %d, body=%s", rr.Code, rr.Body.String())
+func TestNormalizeSpaceMountPath(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "", want: "."},
+		{in: ".", want: "."},
+		{in: "spaces/main", want: "spaces/main"},
+		{in: "spaces/../docs", want: "docs"},
+		{in: "/abs", wantErr: true},
+		{in: "../escape", wantErr: true},
 	}
-	if len(store.saved) == 0 || store.saved[len(store.saved)-1].Spaces[0].Path != "spaces/main" {
-		t.Fatalf("empty repo first space path = %#v", store.saved)
-	}
-
-	populatedRoot := filepath.Join(t.TempDir(), "root")
-	if _, err := gitops.EnsureRepo(populatedRoot); err != nil {
-		t.Fatalf("EnsureRepo populatedRoot: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(populatedRoot, "CONTRIBUTING.md"), []byte("# contrib"), 0o644); err != nil {
-		t.Fatalf("write populated file: %v", err)
-	}
-	store2 := &fakeSettingsStore{}
-	srv2 := newTestServer(t, store2)
-
-	req = httptest.NewRequest(http.MethodPost, "/api/setup/init", strings.NewReader(
-		fmt.Sprintf(`{"root_repo_local_dir":%q,"first_space_key":"main","first_space_name":"Main Space"}`, populatedRoot),
-	))
-	rr = httptest.NewRecorder()
-	srv2.setupInitialSpace(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("setupInitialSpace populated repo status = %d, body=%s", rr.Code, rr.Body.String())
-	}
-	if len(store2.saved) == 0 || store2.saved[len(store2.saved)-1].Spaces[0].Path != "." {
-		t.Fatalf("populated repo first space path = %#v", store2.saved)
+	for _, tt := range tests {
+		got, err := normalizeSpaceMountPath(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Fatalf("normalizeSpaceMountPath(%q) expected error", tt.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("normalizeSpaceMountPath(%q) unexpected error: %v", tt.in, err)
+		}
+		if got != tt.want {
+			t.Fatalf("normalizeSpaceMountPath(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 
