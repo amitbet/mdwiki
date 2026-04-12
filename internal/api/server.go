@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/oauth2"
 
 	"mdwiki/internal/appsettings"
@@ -130,6 +131,7 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/api/spaces/{space}/page", s.getPage)
 	r.Get("/api/spaces/{space}/pages", s.listPages)
+	r.Get("/api/git-jobs/{jobID}", s.getGitJob)
 	r.Post("/api/spaces/{space}/pages", s.createPage)
 	r.Delete("/api/spaces/{space}/pages", s.deletePage)
 	r.Post("/api/spaces/{space}/pages/rename", s.renamePage)
@@ -452,19 +454,43 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		res, err := s.executeGitWrite(r.Context(), gitWriteJob{
+		job := gitWriteJob{
 			ID:          session.NewID(),
 			Op:          "save",
 			RepoRoot:    repoRoot,
 			Branch:      branch,
 			Path:        repoRelPath,
+			NotifySpace: spaceKey,
+			NotifyPath:  body.Path,
 			Content:     body.Content,
 			AuthorName:  authorName,
 			AuthorEmail: authorEmail,
 			PushUser:    s.pushAuthUsername(r),
 			PushToken:   s.pushToken(r),
 			CoAuthors:   body.CoAuthors,
-		})
+		}
+		if s.Redis != nil {
+			accepted, err := s.enqueueGitWrite(r.Context(), job)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"ok":           true,
+				"queued":       true,
+				"job_id":       accepted.JobID,
+				"path":         body.Path,
+				"repo_url":     root,
+				"branch":       branch,
+				"display_name": ent.DisplayName,
+				"save_mode":    saveMode,
+				"message":      "Save queued",
+			})
+			return
+		}
+		res, err := s.executeGitWrite(r.Context(), job)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -490,6 +516,39 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 		"display_name": ent.DisplayName,
 		"save_mode":    saveMode,
 		"message":      msg,
+	})
+}
+
+func (s *Server) getGitJob(w http.ResponseWriter, r *http.Request) {
+	if s.Redis == nil {
+		http.Error(w, "git job status is unavailable without redis mode", http.StatusNotFound)
+		return
+	}
+	jobID := strings.TrimSpace(chi.URLParam(r, "jobID"))
+	if jobID == "" {
+		http.Error(w, "job id required", http.StatusBadRequest)
+		return
+	}
+	state, err := s.getGitJobState(r.Context(), jobID)
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"job_id":   state.JobID,
+		"status":   state.Status,
+		"path":     state.Path,
+		"commit":   state.Result.Commit,
+		"message":  state.Result.Message,
+		"error":    state.Result.Error,
+		"updated":  state.UpdatedAt,
+		"ok":       state.Result.OK,
+		"finished": state.Status == "succeeded" || state.Status == "failed",
 	})
 }
 
@@ -682,13 +741,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		userID = strings.TrimSpace(sess.Login)
 	}
 	cl := &wshub.Client{
-		ID:       session.NewID(),
-		Room:     room,
-		Conn:     conn,
-		Send:     make(chan []byte, 256),
-		TextSend: make(chan []byte, 128),
-		Hub:      s.Hub,
-		UserID:   userID,
+		ID:          session.NewID(),
+		Room:        room,
+		Conn:        conn,
+		Send:        make(chan []byte, 256),
+		TextSend:    make(chan []byte, 128),
+		Hub:         s.Hub,
+		UserID:      userID,
 		ControlOnly: watchOnly,
 	}
 	s.Hub.Register(cl)

@@ -934,6 +934,46 @@ select {
   color: #8ea3bb;
 }
 
+.async-save-badge {
+  margin-left: 6px;
+}
+
+.async-save-badge.is-error {
+  background: rgba(174, 46, 36, 0.12);
+  color: #ae2e24;
+}
+
+.global-sync-indicator {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 80;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(9, 30, 66, 0.88);
+  color: #fff;
+  font-size: 0.92rem;
+  box-shadow: 0 12px 28px rgba(9, 30, 66, 0.24);
+}
+
+.global-job-toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 90;
+  max-width: 320px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #1f845a;
+  color: #fff;
+  box-shadow: 0 14px 32px rgba(9, 30, 66, 0.22);
+}
+
+.global-job-toast.is-error {
+  background: #ae2e24;
+}
+
 @media (max-width: 960px) {
   .wiki-body {
     grid-template-columns: 1fr;

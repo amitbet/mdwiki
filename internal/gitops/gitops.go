@@ -19,6 +19,8 @@ import (
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 )
 
+const jobIDTrailerPrefix = "MDWiki-Job-ID: "
+
 // Service performs git operations on a cloned repo root.
 type Service struct {
 	Root string
@@ -166,22 +168,16 @@ func WriteFileBytesOnly(root, relPath string, content []byte) error {
 
 // Push pushes local commits to origin when configured.
 func Push(root, authUser, token, branch string) error {
+	return PushContext(context.Background(), root, authUser, token, branch)
+}
+
+// PushContext pushes local commits to origin when configured and honors cancellation.
+func PushContext(ctx context.Context, root, authUser, token, branch string) error {
 	targetBranch := normalizeBranchName(branch)
-	headBefore, err := gitRevParse(root, "HEAD")
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := gitPushCLI(root, authUser, token, targetBranch); err != nil {
-		return err
-	}
-	headAfter, err := gitLsRemoteHead(root, targetBranch)
-	if err != nil {
-		return err
-	}
-	if headAfter != headBefore {
-		return fmt.Errorf("push verification failed: remote refs/heads/%s at %s, expected %s", targetBranch, headAfter, headBefore)
-	}
-	if err := gitFetchOriginBranch(root, targetBranch); err != nil {
+	if err := gitPushCLI(ctx, root, authUser, token, targetBranch); err != nil {
 		return err
 	}
 	return nil
@@ -205,9 +201,6 @@ func WritePage(root, relPath, content, authorName, authorEmail, pusherToken stri
 		return err
 	}
 	if _, err := w.Add(relPath); err != nil {
-		return err
-	}
-	if err := w.AddGlob("."); err != nil {
 		return err
 	}
 	msg := fmt.Sprintf("wiki: update %s", relPath)
@@ -241,6 +234,14 @@ func WritePageLocal(root, branch, relPath, content, authorName, authorEmail stri
 
 // WriteFileCommitLocal writes raw bytes and creates a local commit with the provided message.
 func WriteFileCommitLocal(root, branch, relPath string, content []byte, authorName, authorEmail, commitMessage string, coAuthors []string) error {
+	return WriteFileCommitLocalWithJob(context.Background(), root, branch, relPath, content, authorName, authorEmail, commitMessage, coAuthors, "")
+}
+
+// WriteFileCommitLocalWithJob writes raw bytes and creates a local commit with an optional durable job marker.
+func WriteFileCommitLocalWithJob(ctx context.Context, root, branch, relPath string, content []byte, authorName, authorEmail, commitMessage string, coAuthors []string, jobID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	full := filepath.Join(root, relPath)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return err
@@ -262,15 +263,15 @@ func WriteFileCommitLocal(root, branch, relPath string, content []byte, authorNa
 	if _, err := w.Add(relPath); err != nil {
 		return err
 	}
-	if err := w.AddGlob("."); err != nil {
-		return err
-	}
 	status, err := w.Status()
 	if err != nil {
 		return err
 	}
 	if status.IsClean() {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	msg := strings.TrimSpace(commitMessage)
 	if msg == "" {
@@ -282,6 +283,7 @@ func WriteFileCommitLocal(root, branch, relPath string, content []byte, authorNa
 			msg += "Co-authored-by: " + ca + "\n"
 		}
 	}
+	msg = appendJobIDTrailer(msg, jobID)
 	_, err = w.Commit(msg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  authorName,
@@ -302,6 +304,14 @@ func DeleteFileLocal(root, branch, relPath, authorName, authorEmail string) erro
 
 // DeleteFileLocalWithMessage removes a tracked file and creates a local commit when there is a change.
 func DeleteFileLocalWithMessage(root, branch, relPath, authorName, authorEmail, commitMessage string) error {
+	return DeleteFileLocalWithJob(context.Background(), root, branch, relPath, authorName, authorEmail, commitMessage, "")
+}
+
+// DeleteFileLocalWithJob removes a tracked file and creates a local commit with an optional durable job marker.
+func DeleteFileLocalWithJob(ctx context.Context, root, branch, relPath, authorName, authorEmail, commitMessage, jobID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	full := filepath.Join(root, relPath)
 	if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -325,10 +335,14 @@ func DeleteFileLocalWithMessage(root, branch, relPath, authorName, authorEmail, 
 	if status.IsClean() {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	msg := strings.TrimSpace(commitMessage)
 	if msg == "" {
 		msg = fmt.Sprintf("wiki: remove %s", relPath)
 	}
+	msg = appendJobIDTrailer(msg, jobID)
 	_, err = w.Commit(msg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  authorName,
@@ -344,14 +358,28 @@ func DeleteFileLocalWithMessage(root, branch, relPath, authorName, authorEmail, 
 
 // RenameFileLocal renames a tracked/untracked file path and creates a local commit when there is a change.
 func RenameFileLocal(root, branch, oldRelPath, newRelPath, authorName, authorEmail string) error {
+	return RenameFileLocalWithJob(context.Background(), root, branch, oldRelPath, newRelPath, authorName, authorEmail, "")
+}
+
+// RenameFileLocalWithJob renames a file path and creates a local commit with an optional durable job marker.
+func RenameFileLocalWithJob(ctx context.Context, root, branch, oldRelPath, newRelPath, authorName, authorEmail, jobID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	oldFull := filepath.Join(root, oldRelPath)
 	newFull := filepath.Join(root, newRelPath)
 	if err := os.MkdirAll(filepath.Dir(newFull), 0o755); err != nil {
 		return err
 	}
 	if err := os.Rename(oldFull, newFull); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if _, newErr := os.Stat(newFull); newErr == nil {
+				goto stageRename
+			}
+		}
 		return err
 	}
+stageRename:
 	r, err := EnsureRepo(root)
 	if err != nil {
 		return err
@@ -374,7 +402,11 @@ func RenameFileLocal(root, branch, oldRelPath, newRelPath, authorName, authorEma
 	if status.IsClean() {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	msg := fmt.Sprintf("wiki: rename %s -> %s", oldRelPath, newRelPath)
+	msg = appendJobIDTrailer(msg, jobID)
 	_, err = w.Commit(msg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  authorName,
@@ -400,8 +432,19 @@ func EnsureBranch(root, branch string) error {
 		return err
 	}
 	ref := plumbing.NewBranchReferenceName(target)
-	if head, headErr := r.Head(); headErr == nil && head.Name().IsBranch() && head.Name() == ref {
-		return nil
+	if head, headErr := r.Head(); headErr == nil {
+		if head.Name().IsBranch() && head.Name() == ref {
+			return nil
+		}
+	} else {
+		lowerHeadErr := strings.ToLower(headErr.Error())
+		isMissingHead := errors.Is(headErr, plumbing.ErrReferenceNotFound) ||
+			strings.Contains(lowerHeadErr, "reference not found") ||
+			strings.Contains(lowerHeadErr, "not found")
+		if isMissingHead {
+			return r.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, ref))
+		}
+		return headErr
 	}
 	err = w.Checkout(&git.CheckoutOptions{Branch: ref})
 	if err == nil {
@@ -475,6 +518,23 @@ func LastCommitForPath(root, relPath string) (string, error) {
 	return HeadCommit(root)
 }
 
+// FindCommitByJobID returns the newest commit on the branch with the durable job trailer.
+func FindCommitByJobID(root, branch, jobID string) (string, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return "", nil
+	}
+	targetBranch := normalizeBranchName(branch)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "log", "refs/heads/"+targetBranch, "--fixed-strings", "--grep", jobIDTrailerPrefix+jobID, "--format=%H", "-n", "1")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // EncodeBytesBase64 returns standard base64 for transport/storage convenience.
 func EncodeBytesBase64(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
@@ -485,11 +545,79 @@ func DecodeBytesBase64(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(s))
 }
 
-func gitPushCLI(root, authUser, token, branch string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func gitPushCLI(parent context.Context, root, authUser, token, branch string) error {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "push", "origin", "HEAD:refs/heads/"+branch)
+	if err := gitRunAuth(ctx, root, authUser, token, "push", "origin", "HEAD:refs/heads/"+branch); err == nil {
+		return nil
+	} else if !isNonFastForwardPushError(err.Error()) {
+		return err
+	}
+
+	if err := gitFetchOriginBranchAuth(parent, root, authUser, token, branch); err != nil {
+		return err
+	}
+	if err := gitRebaseOntoOriginBranch(parent, root, branch); err != nil {
+		return err
+	}
+	retryCtx, retryCancel := context.WithTimeout(parent, 30*time.Second)
+	defer retryCancel()
+	return gitRunAuth(retryCtx, root, authUser, token, "push", "origin", "HEAD:refs/heads/"+branch)
+}
+
+func gitRevParse(root, rev string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", rev)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func gitLsRemoteHead(root, branch string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-remote", "origin", "refs/heads/"+branch)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("remote branch refs/heads/%s not found", branch)
+	}
+	return strings.TrimSpace(fields[0]), nil
+}
+
+func gitFetchOriginBranch(root, branch string) error {
+	return gitFetchOriginBranchAuth(context.Background(), root, "", "", branch)
+}
+
+func gitFetchOriginBranchAuth(parent context.Context, root, authUser, token, branch string) error {
+	targetBranch := normalizeBranchName(branch)
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	defer cancel()
+	return gitRunAuth(ctx, root, authUser, token, "fetch", "origin", "refs/heads/"+targetBranch+":refs/remotes/origin/"+targetBranch)
+}
+
+func gitRebaseOntoOriginBranch(parent context.Context, root, branch string) error {
+	targetBranch := normalizeBranchName(branch)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	if err := gitRunAuth(ctx, root, "", "", "rebase", "refs/remotes/origin/"+targetBranch); err != nil {
+		abortCtx, abortCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer abortCancel()
+		_ = gitRunAuth(abortCtx, root, "", "", "rebase", "--abort")
+		return fmt.Errorf("remote branch changed and automatic rebase failed: %w", err)
+	}
+	return nil
+}
+
+func gitRunAuth(ctx context.Context, root, authUser, token string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0")
 
@@ -521,46 +649,11 @@ func gitPushCLI(root, authUser, token, branch string) error {
 	return nil
 }
 
-func gitRevParse(root, rev string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", rev)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func gitLsRemoteHead(root, branch string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-remote", "origin", "refs/heads/"+branch)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	fields := strings.Fields(string(out))
-	if len(fields) == 0 {
-		return "", fmt.Errorf("remote branch refs/heads/%s not found", branch)
-	}
-	return strings.TrimSpace(fields[0]), nil
-}
-
-func gitFetchOriginBranch(root, branch string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "-C", root, "fetch", "origin", branch)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return errors.New(msg)
-	}
-	return nil
+func isNonFastForwardPushError(msg string) bool {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(lower, "non-fast-forward") ||
+		strings.Contains(lower, "fetch first") ||
+		strings.Contains(lower, "failed to push some refs")
 }
 
 func writeAskpassScript(user, token string) (string, error) {
@@ -580,4 +673,16 @@ func writeAskpassScript(user, token string) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+func appendJobIDTrailer(message, jobID string) string {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return message
+	}
+	msg := strings.TrimRight(message, "\n")
+	if strings.Contains(msg, "\n\n") {
+		return msg + "\n" + jobIDTrailerPrefix + jobID
+	}
+	return msg + "\n\n" + jobIDTrailerPrefix + jobID
 }

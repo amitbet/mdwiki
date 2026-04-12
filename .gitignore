@@ -7,6 +7,5 @@
 local.mk
 .DS_Store
 cmd/wiki/wiki
-mdwiki
 tmp/build-errors.log
-wiki
+mdwiki

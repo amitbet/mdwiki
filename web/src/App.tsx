@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import WikiEditor, { type SpaceInfo } from "./WikiEditor";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import WikiEditor, { type PendingSaveJob, type SpaceInfo } from "./WikiEditor";
 
 const LS_SPACE = "mdwiki.space";
 const LS_PAGE = "mdwiki.page";
+const LS_PENDING_JOBS = "mdwiki.pending_save_jobs";
 
 type DeviceFlowState = {
   flow_id: string;
@@ -37,6 +38,30 @@ function writeLS(key: string, value: string) {
   } catch {
     // ignore
   }
+}
+
+function readPendingJobs(): PendingSaveJob[] {
+  try {
+    const raw = localStorage.getItem(LS_PENDING_JOBS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as PendingSaveJob[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writePendingJobs(jobs: PendingSaveJob[]) {
+  try {
+    localStorage.setItem(LS_PENDING_JOBS, JSON.stringify(jobs));
+  } catch {
+    // ignore
+  }
+}
+
+function pageTitle(path: string): string {
+  const file = (path.split("/").pop() || path).replace(/\.md$/i, "");
+  return file || path;
 }
 
 function LoginScreen({
@@ -193,7 +218,91 @@ export default function App() {
       return "light";
     }
   });
+  const [pendingJobs, setPendingJobs] = useState<PendingSaveJob[]>(() => readPendingJobs());
+  const [jobToast, setJobToast] = useState<{ kind: "success" | "error"; text: string } | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingJobsRef = useRef<PendingSaveJob[]>(pendingJobs);
+
+  useEffect(() => {
+    pendingJobsRef.current = pendingJobs;
+  }, [pendingJobs]);
+
+  useEffect(() => {
+    writePendingJobs(pendingJobs.filter((job) => job.status === "queued" || job.status === "running"));
+  }, [pendingJobs]);
+
+  useEffect(() => {
+    if (!jobToast) {
+      return;
+    }
+    const id = window.setTimeout(() => setJobToast(null), 4000);
+    return () => window.clearTimeout(id);
+  }, [jobToast]);
+
+  const mergePendingJob = useCallback((job: PendingSaveJob) => {
+    setPendingJobs((prev) => {
+      const idx = prev.findIndex((item) => item.jobId === job.jobId);
+      if (idx < 0) {
+        return [...prev, job];
+      }
+      const next = prev.slice();
+      next[idx] = { ...prev[idx], ...job };
+      return next;
+    });
+  }, []);
+
+  const removePendingJob = useCallback((jobId: string) => {
+    setPendingJobs((prev) => prev.filter((job) => job.jobId !== jobId));
+  }, []);
+
+  const applyJobUpdate = useCallback((job: PendingSaveJob) => {
+    let shouldToast = false;
+    setPendingJobs((prev) => {
+      const idx = prev.findIndex((item) => item.jobId === job.jobId);
+      if (idx < 0) {
+        shouldToast = job.status === "succeeded" || job.status === "failed";
+        return [...prev, job];
+      }
+      const next = prev.slice();
+      const prevJob = prev[idx];
+      shouldToast = prevJob.status !== job.status && (job.status === "succeeded" || job.status === "failed");
+      next[idx] = { ...prev[idx], ...job };
+      return next;
+    });
+    if (shouldToast) {
+      setJobToast({
+        kind: job.status === "succeeded" ? "success" : "error",
+        text: job.status === "succeeded" ? `Saved ${pageTitle(job.path)}` : `Failed to sync ${pageTitle(job.path)}`,
+      });
+      window.setTimeout(() => removePendingJob(job.jobId), 3500);
+    }
+  }, [removePendingJob]);
+
+  const reconcilePendingJob = useCallback(async (jobId: string) => {
+    const r = await fetch(`/api/git-jobs/${encodeURIComponent(jobId)}`, { credentials: "include" });
+    if (r.status === 404) {
+      return;
+    }
+    if (!r.ok) {
+      throw new Error(await r.text());
+    }
+    const j = (await r.json()) as { job_id?: string; status?: PendingSaveJob["status"]; path?: string; commit?: string; message?: string; error?: string };
+    if (!j.job_id || !j.status) {
+      return;
+    }
+    const existing = pendingJobsRef.current.find((job) => job.jobId === j.job_id);
+    applyJobUpdate({
+      jobId: j.job_id,
+      space: existing?.space ?? space,
+      path: j.path ?? existing?.path ?? "",
+      status: j.status,
+      commit: j.commit,
+      message: j.message,
+      error: j.error,
+      snapshot: existing?.snapshot,
+      updatedAt: new Date().toISOString(),
+    });
+  }, [applyJobUpdate, space]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -289,7 +398,7 @@ export default function App() {
       if (ev.data instanceof ArrayBuffer) {
         return;
       }
-      let ctrl: { type?: string };
+      let ctrl: { type?: string; job_id?: string; status?: PendingSaveJob["status"]; path?: string; commit?: string; message?: string; error?: string };
       try {
         ctrl = JSON.parse(String(ev.data));
       } catch {
@@ -297,12 +406,62 @@ export default function App() {
       }
       if (ctrl.type === "spaces_invalidated") {
         void loadSpaces();
+        return;
+      }
+      if (ctrl.type === "git_job_update" && ctrl.job_id && ctrl.status) {
+        const existing = pendingJobsRef.current.find((job) => job.jobId === ctrl.job_id);
+        applyJobUpdate({
+          jobId: ctrl.job_id,
+          space: existing?.space ?? space,
+          path: ctrl.path ?? existing?.path ?? "",
+          status: ctrl.status,
+          commit: ctrl.commit,
+          message: ctrl.message,
+          error: ctrl.error,
+          snapshot: existing?.snapshot,
+          updatedAt: new Date().toISOString(),
+        });
       }
     };
     return () => {
       ws.close();
     };
-  }, [loadSpaces, session, setup]);
+  }, [applyJobUpdate, loadSpaces, session, setup, space]);
+
+  useEffect(() => {
+    if (!session || !setup?.configured || pendingJobs.length === 0) {
+      return;
+    }
+    let stopped = false;
+    const pending = pendingJobs.filter((job) => job.status === "queued" || job.status === "running");
+    if (pending.length === 0) {
+      return;
+    }
+    const tick = async () => {
+      if (stopped) return;
+      await Promise.allSettled(pending.map((job) => reconcilePendingJob(job.jobId)));
+    };
+    void tick();
+    const interval = window.setInterval(() => {
+      void tick();
+    }, 4000);
+    const onFocus = () => {
+      void tick();
+    };
+    const onVisibility = () => {
+      if (!document.hidden) {
+        void tick();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [pendingJobs, reconcilePendingJob, session, setup]);
 
   useEffect(() => {
     if (!spaces || spaces.length === 0) return;
@@ -319,6 +478,13 @@ export default function App() {
   useEffect(() => {
     writeLS(LS_PAGE, path);
   }, [path]);
+
+  const currentPagePendingSave = useMemo(() => {
+    const matches = pendingJobs.filter((job) => job.space === space && job.path === path);
+    return matches.length > 0 ? matches[matches.length - 1] : null;
+  }, [path, pendingJobs, space]);
+
+  const activePendingCount = pendingJobs.filter((job) => job.status === "queued" || job.status === "running").length;
 
   const login = useCallback(() => {
     window.location.href = "/auth/github";
@@ -444,20 +610,30 @@ export default function App() {
   }
 
   return (
-    <WikiEditor
-      key={`${space}:${path}`}
-      spaces={spaces}
-      space={space}
-      onSpaceChange={(k) => {
-        setSpace(k);
-        setPath("README.md");
-      }}
-      onSpacesChanged={loadSpaces}
-      currentUserLogin={session.login}
-      path={path}
-      onPathChange={setPath}
-      theme={theme}
-      onToggleTheme={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
-    />
+    <>
+      {activePendingCount > 0 ? (
+        <div className="global-sync-indicator">
+          {activePendingCount === 1 ? "1 save syncing in the background" : `${activePendingCount} saves syncing in the background`}
+        </div>
+      ) : null}
+      {jobToast ? <div className={`global-job-toast ${jobToast.kind === "error" ? "is-error" : "is-success"}`}>{jobToast.text}</div> : null}
+      <WikiEditor
+        key={`${space}:${path}`}
+        spaces={spaces}
+        space={space}
+        onSpaceChange={(k) => {
+          setSpace(k);
+          setPath("README.md");
+        }}
+        onSpacesChanged={loadSpaces}
+        currentUserLogin={session.login}
+        path={path}
+        onPathChange={setPath}
+        theme={theme}
+        onToggleTheme={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
+        currentPagePendingSave={currentPagePendingSave}
+        onQueueSave={mergePendingJob}
+      />
+    </>
   );
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config holds server configuration.
@@ -20,7 +21,12 @@ type Config struct {
 	GitHubSecret      string
 	GitHubCallbackURL string
 	SessionSecret     string
+	RedisEnabled      bool
 	RedisURL          string // empty = single-instance mode
+	RedisAddrs        []string
+	RedisClusterMode  bool
+	RedisUsername     string
+	RedisPassword     string
 	ServerGitToken    string // PAT or app token for clone/fallback push
 	FrontendOrigin    string // CORS
 }
@@ -40,7 +46,12 @@ func FromEnv() Config {
 		GitHubSecret:      os.Getenv("MDWIKI_GITHUB_CLIENT_SECRET"),
 		GitHubCallbackURL: get("MDWIKI_GITHUB_CALLBACK", "http://localhost:8080/auth/github/callback"),
 		SessionSecret:     get("MDWIKI_SESSION_SECRET", "dev-insecure-change-me"),
+		RedisEnabled:      Bool("MDWIKI_REDIS_ENABLED", false),
 		RedisURL:          os.Getenv("MDWIKI_REDIS_URL"),
+		RedisAddrs:        splitCSV(os.Getenv("MDWIKI_REDIS_ADDRS")),
+		RedisClusterMode:  Bool("MDWIKI_REDIS_CLUSTER_MODE", false),
+		RedisUsername:     os.Getenv("MDWIKI_REDIS_USERNAME"),
+		RedisPassword:     os.Getenv("MDWIKI_REDIS_PASSWORD"),
 		ServerGitToken:    os.Getenv("MDWIKI_SERVER_GIT_TOKEN"),
 		FrontendOrigin:    get("MDWIKI_FRONTEND_ORIGIN", "http://localhost:5173"),
 	}
@@ -63,4 +74,20 @@ func Bool(k string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+func splitCSV(v string) []string {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return out
 }

@@ -96,6 +96,8 @@ type Props = {
   onPathChange: (p: string) => void;
   theme: "light" | "dark";
   onToggleTheme: () => void;
+  currentPagePendingSave: PendingSaveJob | null;
+  onQueueSave: (job: PendingSaveJob) => void;
 };
 
 type SettingsInfo = {
@@ -139,6 +141,18 @@ type RefreshPrompt = {
   path: string;
   commit?: string;
 } | null;
+
+export type PendingSaveJob = {
+  jobId: string;
+  space: string;
+  path: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  message?: string;
+  error?: string;
+  commit?: string;
+  snapshot?: string;
+  updatedAt?: string;
+};
 
 const DEFAULT_PAGE_TEXT = "# New Page\n\nStart writing here.\n";
 const CODE_LANGUAGES = [
@@ -556,6 +570,8 @@ export default function WikiEditor({
   onPathChange,
   theme,
   onToggleTheme,
+  currentPagePendingSave,
+  onQueueSave,
 }: Props) {
   const [tree, setTree] = useState<PageTreeNode[]>([]);
   const [markdown, setMarkdown] = useState(DEFAULT_PAGE_TEXT);
@@ -595,6 +611,7 @@ export default function WikiEditor({
   const [pendingNavigation, setPendingNavigation] = useState<PendingNavigation>(null);
   const [navigationDecisionBusy, setNavigationDecisionBusy] = useState<"save" | "discard" | null>(null);
   const [refreshPrompt, setRefreshPrompt] = useState<RefreshPrompt>(null);
+  const [asyncSaveState, setAsyncSaveState] = useState<"idle" | "queued" | "running" | "failed">("idle");
   const [editorSession, setEditorSession] = useState(0);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const codeLangHoverRef = useRef(false);
@@ -683,7 +700,7 @@ export default function WikiEditor({
   const commitCurrentState = useCallback(async () => {
     const body = editor ? htmlToMarkdown(editor.getHTML()) : markdown;
     if (canonicalMarkdown(body) === canonicalMarkdown(lastSavedMarkdownRef.current)) {
-      return { message: "", commit: baseCommit };
+      return { mode: "sync" as const, message: "", commit: baseCommit };
     }
     const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/page`, {
       method: "POST",
@@ -698,17 +715,35 @@ export default function WikiEditor({
     if (!r.ok) {
       throw new Error(await readApiError(r, "save failed"));
     }
-    const j = (await r.json()) as { message?: string; commit?: string };
+    const j = (await r.json()) as { message?: string; commit?: string; queued?: boolean; job_id?: string };
     markdownRef.current = body;
     setMarkdown(body);
     lastSavedMarkdownRef.current = canonicalMarkdown(body);
+    if (j.queued && typeof j.job_id === "string" && j.job_id) {
+      onQueueSave({
+        jobId: j.job_id,
+        space,
+        path,
+        status: "queued",
+        message: typeof j.message === "string" ? j.message : "Save queued",
+        snapshot: body,
+        updatedAt: new Date().toISOString(),
+      });
+      return {
+        mode: "queued" as const,
+        message: typeof j.message === "string" ? j.message : "Save queued",
+        commit: baseCommit,
+        jobId: j.job_id,
+      };
+    }
     const nextCommit = typeof j.commit === "string" ? j.commit : baseCommit;
     setBaseCommit(nextCommit);
     return {
+      mode: "sync" as const,
       message: typeof j.message === "string" ? j.message : "",
       commit: nextCommit,
     };
-  }, [baseCommit, editor, markdown, path, space]);
+  }, [baseCommit, editor, markdown, onQueueSave, path, space]);
 
   useEffect(() => {
     if (error) {
@@ -1358,18 +1393,27 @@ export default function WikiEditor({
     try {
       const result = await commitCurrentState();
       const normalized = normalizeApiErrorMessage(result.message);
-      if (normalized.toLowerCase().includes("push failed")) {
+      if (result.mode === "queued") {
+        setAsyncSaveState("queued");
+        setStatus("Syncing…");
+        setError(null);
+        setConsecutiveSaveFailures(0);
+        setDirty(false);
+      } else if (normalized.toLowerCase().includes("push failed")) {
         setError(normalized);
         setStatus(`Saved locally ${new Date().toLocaleTimeString()}`);
       } else {
         setStatus(`Saved ${new Date().toLocaleTimeString()}`);
+        setAsyncSaveState("idle");
       }
-      setConsecutiveSaveFailures(0);
-      setDirty(false);
-      await discardDraft().catch(() => {});
-      setDraftInfo(null);
-      await loadTree();
-      await loadComments();
+      if (result.mode !== "queued") {
+        setConsecutiveSaveFailures(0);
+        setDirty(false);
+        await discardDraft().catch(() => {});
+        setDraftInfo(null);
+        await loadTree();
+        await loadComments();
+      }
     } catch (e) {
       const nextErr = e instanceof Error ? e.message : "save failed";
       setError(nextErr);
@@ -1411,7 +1455,45 @@ export default function WikiEditor({
     setPendingNavigation(null);
     setNavigationDecisionBusy(null);
     setRefreshPrompt(null);
-  }, [space, path]);
+    setAsyncSaveState(currentPagePendingSave?.status === "running" ? "running" : currentPagePendingSave?.status === "queued" ? "queued" : currentPagePendingSave?.status === "failed" ? "failed" : "idle");
+  }, [currentPagePendingSave?.status, path, space]);
+
+  useEffect(() => {
+    if (!currentPagePendingSave || currentPagePendingSave.space !== space || currentPagePendingSave.path !== path) {
+      if (asyncSaveState !== "idle") {
+        setAsyncSaveState("idle");
+      }
+      return;
+    }
+    if (currentPagePendingSave.status === "queued") {
+      setAsyncSaveState("queued");
+      setStatus("Syncing…");
+      setError(null);
+      return;
+    }
+    if (currentPagePendingSave.status === "running") {
+      setAsyncSaveState("running");
+      setStatus("Syncing to git…");
+      setError(null);
+      return;
+    }
+    if (currentPagePendingSave.status === "succeeded") {
+      setAsyncSaveState("idle");
+      setError(null);
+      setBaseCommit(currentPagePendingSave.commit ?? "");
+      setStatus(`Saved ${new Date().toLocaleTimeString()}`);
+      setConsecutiveSaveFailures(0);
+      return;
+    }
+    if (currentPagePendingSave.status === "failed") {
+      setAsyncSaveState("failed");
+      setError(currentPagePendingSave.error || currentPagePendingSave.message || "save sync failed");
+      setStatus("Save queued but failed during sync");
+      if (currentPagePendingSave.snapshot && canonicalMarkdown(markdownRef.current) === canonicalMarkdown(currentPagePendingSave.snapshot)) {
+        setDirty(true);
+      }
+    }
+  }, [asyncSaveState, currentPagePendingSave, path, space]);
 
   useEffect(() => {
     if (!canEdit) {
@@ -2354,6 +2436,10 @@ export default function WikiEditor({
             )}
           </span>
         </button>
+        {asyncSaveState === "queued" || asyncSaveState === "running" ? (
+          <span className="sync-badge async-save-badge">{asyncSaveState === "queued" ? "Syncing…" : "Syncing to git…"}</span>
+        ) : null}
+        {asyncSaveState === "failed" ? <span className="sync-badge async-save-badge is-error">Sync failed</span> : null}
       </header>
       <div className="wiki-body">
         <aside className="wiki-sidebar">

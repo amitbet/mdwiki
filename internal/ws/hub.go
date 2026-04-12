@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -13,15 +14,16 @@ import (
 
 // MsgType control messages (JSON text frames).
 const (
-	MsgYjsUpdate        = "yjs"               // binary frame, not JSON
-	MsgRequestState     = "request_state"     // server asks peer to supply full state
-	MsgStateBlob        = "state_blob"        // peer -> server -> joiner
-	MsgNeedSync         = "need_sync"         // joiner announces need full sync
-	MsgSyncFailedLock   = "sync_lock"         // server: read-only until peer sync
-	MsgSyncOK           = "sync_ok"           // server: editing allowed
-	MsgPagesInvalidated = "pages_invalidated" // page tree changed in this space
+	MsgYjsUpdate         = "yjs"                // binary frame, not JSON
+	MsgRequestState      = "request_state"      // server asks peer to supply full state
+	MsgStateBlob         = "state_blob"         // peer -> server -> joiner
+	MsgNeedSync          = "need_sync"          // joiner announces need full sync
+	MsgSyncFailedLock    = "sync_lock"          // server: read-only until peer sync
+	MsgSyncOK            = "sync_ok"            // server: editing allowed
+	MsgPagesInvalidated  = "pages_invalidated"  // page tree changed in this space
 	MsgSpacesInvalidated = "spaces_invalidated" // space list changed
-	MsgPageSaved        = "page_saved"        // saved git/local version available for a page
+	MsgPageSaved         = "page_saved"         // saved git/local version available for a page
+	MsgGitJobUpdate      = "git_job_update"     // async git save job status update
 )
 
 // Control JSON message.
@@ -34,18 +36,22 @@ type Control struct {
 	Reason     string `json:"reason,omitempty"`
 	Path       string `json:"path,omitempty"`
 	Commit     string `json:"commit,omitempty"`
+	JobID      string `json:"job_id,omitempty"`
+	Status     string `json:"status,omitempty"`
+	Message    string `json:"message,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Client is one websocket connection.
 type Client struct {
-	ID       string
-	Room     string
-	Conn     *websocket.Conn
-	Send     chan []byte
-	TextSend chan []byte
-	Hub      *Hub
-	UserID   string // optional session id for contributor tracking
-	ReadOnly bool
+	ID          string
+	Room        string
+	Conn        *websocket.Conn
+	Send        chan []byte
+	TextSend    chan []byte
+	Hub         *Hub
+	UserID      string // optional session id for contributor tracking
+	ReadOnly    bool
 	ControlOnly bool
 }
 
@@ -53,6 +59,7 @@ type Client struct {
 type Hub struct {
 	mu         sync.RWMutex
 	rooms      map[string]map[*Client]bool
+	roomSubs   map[string]context.CancelFunc
 	register   chan *Client
 	unregister chan *Client
 	broadcast  chan broadcastMsg
@@ -68,13 +75,15 @@ type broadcastMsg struct {
 
 // RedisPubSub optional interface.
 type RedisPubSub interface {
-	Publish(room string, data []byte)
+	Publish(room string, data []byte, isBinary bool)
+	Subscribe(ctx context.Context, room string, fn func([]byte, bool)) error
 }
 
 // NewHub creates hub.
 func NewHub(r RedisPubSub) *Hub {
 	return &Hub{
 		rooms:      make(map[string]map[*Client]bool),
+		roomSubs:   make(map[string]context.CancelFunc),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		broadcast:  make(chan broadcastMsg, 256),
@@ -90,6 +99,9 @@ func (h *Hub) Run() {
 			h.mu.Lock()
 			if h.rooms[c.Room] == nil {
 				h.rooms[c.Room] = make(map[*Client]bool)
+			}
+			if len(h.rooms[c.Room]) == 0 {
+				h.ensureRedisSubscriptionLocked(c.Room)
 			}
 			h.rooms[c.Room][c] = true
 			n := len(h.rooms[c.Room])
@@ -121,6 +133,10 @@ func (h *Hub) Run() {
 					}
 				}
 				if len(m) == 0 {
+					if cancel := h.roomSubs[c.Room]; cancel != nil {
+						cancel()
+						delete(h.roomSubs, c.Room)
+					}
 					delete(h.rooms, c.Room)
 				}
 			}
@@ -129,26 +145,45 @@ func (h *Hub) Run() {
 			close(c.TextSend)
 
 		case b := <-h.broadcast:
-			h.mu.RLock()
-			clients := h.rooms[b.room]
-			for cl := range clients {
-				if b.skip != nil && cl == b.skip {
-					continue
-				}
-				select {
-				case func() chan []byte {
-					if b.isBinary {
-						return cl.Send
-					}
-					return cl.TextSend
-				}() <- b.data:
-				default:
-				}
-			}
-			h.mu.RUnlock()
+			h.deliver(b.room, b.data, b.isBinary, b.skip)
 			if h.redis != nil {
-				h.redis.Publish(b.room, b.data)
+				h.redis.Publish(b.room, b.data, b.isBinary)
 			}
+		}
+	}
+}
+
+func (h *Hub) ensureRedisSubscriptionLocked(room string) {
+	if h.redis == nil || h.roomSubs[room] != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.roomSubs[room] = cancel
+	go func() {
+		err := h.redis.Subscribe(ctx, room, func(data []byte, isBinary bool) {
+			h.deliver(room, data, isBinary, nil)
+		})
+		if err != nil && err != context.Canceled {
+			log.Printf("ws redis subscribe room=%s: %v", room, err)
+		}
+	}()
+}
+
+func (h *Hub) deliver(room string, data []byte, isBinary bool, skip *Client) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for cl := range h.rooms[room] {
+		if skip != nil && cl == skip {
+			continue
+		}
+		select {
+		case func() chan []byte {
+			if isBinary {
+				return cl.Send
+			}
+			return cl.TextSend
+		}() <- data:
+		default:
 		}
 	}
 }

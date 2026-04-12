@@ -16,7 +16,12 @@ func TestFromEnvDefaults(t *testing.T) {
 	t.Setenv("MDWIKI_GITHUB_CLIENT_SECRET", "")
 	t.Setenv("MDWIKI_GITHUB_CALLBACK", "")
 	t.Setenv("MDWIKI_SESSION_SECRET", "")
+	t.Setenv("MDWIKI_REDIS_ENABLED", "")
 	t.Setenv("MDWIKI_REDIS_URL", "")
+	t.Setenv("MDWIKI_REDIS_ADDRS", "")
+	t.Setenv("MDWIKI_REDIS_CLUSTER_MODE", "")
+	t.Setenv("MDWIKI_REDIS_USERNAME", "")
+	t.Setenv("MDWIKI_REDIS_PASSWORD", "")
 	t.Setenv("MDWIKI_SERVER_GIT_TOKEN", "")
 	t.Setenv("MDWIKI_FRONTEND_ORIGIN", "")
 
@@ -54,6 +59,12 @@ func TestFromEnvDefaults(t *testing.T) {
 	if cfg.SessionSecret != "dev-insecure-change-me" {
 		t.Fatalf("SessionSecret = %q", cfg.SessionSecret)
 	}
+	if cfg.RedisEnabled {
+		t.Fatalf("RedisEnabled should default to false")
+	}
+	if len(cfg.RedisAddrs) != 0 {
+		t.Fatalf("RedisAddrs should default empty, got %+v", cfg.RedisAddrs)
+	}
 	if cfg.FrontendOrigin != "http://localhost:5173" {
 		t.Fatalf("FrontendOrigin = %q", cfg.FrontendOrigin)
 	}
@@ -73,7 +84,12 @@ func TestFromEnvOverrides(t *testing.T) {
 	t.Setenv("MDWIKI_GITHUB_CLIENT_SECRET", "secret")
 	t.Setenv("MDWIKI_GITHUB_CALLBACK", "http://callback")
 	t.Setenv("MDWIKI_SESSION_SECRET", "session")
+	t.Setenv("MDWIKI_REDIS_ENABLED", "true")
 	t.Setenv("MDWIKI_REDIS_URL", "redis://localhost")
+	t.Setenv("MDWIKI_REDIS_ADDRS", "127.0.0.1:7000,127.0.0.1:7001")
+	t.Setenv("MDWIKI_REDIS_CLUSTER_MODE", "true")
+	t.Setenv("MDWIKI_REDIS_USERNAME", "redis-user")
+	t.Setenv("MDWIKI_REDIS_PASSWORD", "redis-pass")
 	t.Setenv("MDWIKI_SERVER_GIT_TOKEN", "token")
 	t.Setenv("MDWIKI_FRONTEND_ORIGIN", "http://frontend")
 
@@ -93,8 +109,14 @@ func TestFromEnvOverrides(t *testing.T) {
 	if cfg.GitHubCallbackURL != "http://callback" || cfg.SessionSecret != "session" {
 		t.Fatalf("unexpected overridden callback/session config: %+v", cfg)
 	}
-	if cfg.RedisURL != "redis://localhost" || cfg.ServerGitToken != "token" || cfg.FrontendOrigin != "http://frontend" {
+	if !cfg.RedisEnabled || cfg.RedisURL != "redis://localhost" || cfg.ServerGitToken != "token" || cfg.FrontendOrigin != "http://frontend" {
 		t.Fatalf("unexpected overridden integration config: %+v", cfg)
+	}
+	if !cfg.RedisClusterMode || cfg.RedisUsername != "redis-user" || cfg.RedisPassword != "redis-pass" {
+		t.Fatalf("unexpected overridden redis mode config: %+v", cfg)
+	}
+	if len(cfg.RedisAddrs) != 2 || cfg.RedisAddrs[0] != "127.0.0.1:7000" || cfg.RedisAddrs[1] != "127.0.0.1:7001" {
+		t.Fatalf("unexpected overridden redis addrs: %+v", cfg.RedisAddrs)
 	}
 }
 
@@ -115,5 +137,15 @@ func TestBool(t *testing.T) {
 	}
 	if Bool("BOOL_EMPTY", false) {
 		t.Fatalf("BOOL_EMPTY should use default false")
+	}
+}
+
+func TestSplitCSV(t *testing.T) {
+	got := splitCSV(" redis-1:7000, ,redis-2:7001 ")
+	if len(got) != 2 || got[0] != "redis-1:7000" || got[1] != "redis-2:7001" {
+		t.Fatalf("splitCSV mismatch: %+v", got)
+	}
+	if splitCSV("") != nil {
+		t.Fatalf("splitCSV empty should return nil")
 	}
 }

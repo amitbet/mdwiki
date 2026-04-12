@@ -29,12 +29,19 @@ func main() {
 
 	var redisPub wshub.RedisPubSub
 	var redisSvc *redisx.PubSub
-	if r, err := redisx.New(os.Getenv("MDWIKI_REDIS_URL")); err != nil {
+	if r, err := redisx.New(redisx.Options{
+		Enabled:     cfg.RedisEnabled,
+		URL:         cfg.RedisURL,
+		Addrs:       cfg.RedisAddrs,
+		ClusterMode: cfg.RedisClusterMode,
+		Username:    cfg.RedisUsername,
+		Password:    cfg.RedisPassword,
+	}); err != nil {
 		log.Printf("redis: %v", err)
 	} else if r != nil {
 		redisSvc = r
 		redisPub = r
-		log.Println("redis enabled for Yjs pub/sub and distributed git write queue")
+		log.Println("redis enabled for cross-node Yjs sync and distributed git write queue")
 	}
 	hub := wshub.NewHub(redisPub)
 	go hub.Run()

@@ -48,6 +48,20 @@ export MDWIKI_GITHUB_CALLBACK=http://localhost:8080/auth/github/callback
 # Git clone/push (user token after login, or server token)
 export MDWIKI_SERVER_GIT_TOKEN=...
 
+# Optional distributed mode for multiple mdwiki servers.
+# Disabled by default; leave MDWIKI_REDIS_ENABLED unset for single-server mode.
+export MDWIKI_REDIS_ENABLED=1
+
+# Single Redis:
+export MDWIKI_REDIS_URL=redis://127.0.0.1:6379/0
+
+# Or Redis Cluster:
+# export MDWIKI_REDIS_ADDRS=127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002
+# export MDWIKI_REDIS_CLUSTER_MODE=1
+# Optional auth for either mode:
+# export MDWIKI_REDIS_USERNAME=...
+# export MDWIKI_REDIS_PASSWORD=...
+
 go run ./cmd/wiki
 ```
 
@@ -75,7 +89,7 @@ If `MDWIKI_DEV=1`, open `GET http://localhost:8080/api/dev/login` once to obtain
 | Anchors | `internal/anchor` — `<!-- wiki:anchor:id -->` extraction |
 | GFM | `web/src/md/render.ts` — remark + remark-gfm + rehype-sanitize (pinned in package-lock) |
 | Yjs + Go WS | `internal/ws` hub, `web/src/WikiEditor.tsx` |
-| Redis | `internal/redisx` + `MDWIKI_REDIS_URL` (publish stub; subscribe wiring optional) |
+| Redis | `internal/redisx` + `MDWIKI_REDIS_ENABLED`; single-node via `MDWIKI_REDIS_URL`, cluster via `MDWIKI_REDIS_ADDRS` |
 | Search | `internal/search` SQLite FTS5 |
 | Git | `internal/gitops` clone / pull / commit / push |
 | OAuth | `internal/oauth`, `internal/api` `/auth/github`, `/auth/github/device/*` |
@@ -85,6 +99,50 @@ If `MDWIKI_DEV=1`, open `GET http://localhost:8080/api/dev/login` once to obtain
 ## Production
 
 Build the UI: `cd web && npm run build`, then serve `web/dist` with a reverse proxy or add a static file route to the Go server.
+
+## Redis-backed multi-server mode
+
+Single-server mode remains the default. Redis mode is enabled only when `MDWIKI_REDIS_ENABLED=1`.
+
+When Redis mode is on, mdwiki uses Redis for two cross-server features:
+
+1. Yjs websocket fan-out so clients connected to different mdwiki servers but in the same room stay in sync.
+2. Distributed git write coordination via a Redis Streams worker queue plus Redis locks, with mdwiki servers acting as queue workers.
+
+In Redis mode, page saves are asynchronous: `POST /api/spaces/{space}/page` returns `202 Accepted` with a `job_id` once the save is queued, and the UI tracks completion via WebSocket job updates with HTTP status fallback. Single-server mode keeps the existing synchronous save UX.
+
+The git worker path includes:
+
+- Redis Streams consumer groups for durable claim/ack and abandoned-job recovery
+- Lock renewal for long-running git operations
+- Per-job idempotency state so duplicate submissions with the same job id do not execute twice
+
+To smoke-test the Redis integration with Docker:
+
+```bash
+# Single Redis
+docker run --rm -d --name mdwiki-redis-single -p 6379:6379 redis:7-alpine
+MDWIKI_REDIS_INTEGRATION=1 \
+MDWIKI_REDIS_ENABLED=1 \
+MDWIKI_REDIS_URL=redis://127.0.0.1:6379/0 \
+go test ./internal/redisx -run TestRedisIntegration -count=1
+docker stop mdwiki-redis-single
+
+# Redis Cluster (example using a local 6-node cluster image)
+docker run --rm -d --name mdwiki-redis-cluster -p 7000-7005:7000-7005 grokzen/redis-cluster:7.0.10
+# This image advertises internal node IPs, so run the test from a container in the same network namespace.
+docker run --rm \
+  --network container:mdwiki-redis-cluster \
+  -v "$PWD":/src \
+  -w /src \
+  -e MDWIKI_REDIS_INTEGRATION=1 \
+  -e MDWIKI_REDIS_ENABLED=1 \
+  -e MDWIKI_REDIS_ADDRS=127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002 \
+  -e MDWIKI_REDIS_CLUSTER_MODE=1 \
+  golang:1.25 \
+  go test ./internal/redisx -run TestRedisIntegration -count=1
+docker stop mdwiki-redis-cluster
+```
 
 ## License
 
