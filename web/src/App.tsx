@@ -15,6 +15,8 @@ type DeviceFlowState = {
 
 type SetupStatus = {
   configured: boolean;
+  first_space_default_path?: string;
+  existing_repo_detected?: boolean;
   settings?: {
     root_repo_url?: string;
     root_repo_local_dir?: string;
@@ -120,17 +122,35 @@ function LoginScreen({
 
 function SetupScreen({
   initialSettings,
+  initialDefaultPath,
+  existingRepoDetected,
   onConfigured,
 }: {
   initialSettings?: SetupStatus["settings"];
+  initialDefaultPath?: string;
+  existingRepoDetected?: boolean;
   onConfigured: () => void;
 }) {
   const [rootRepoLocalDir, setRootRepoLocalDir] = useState(initialSettings?.root_repo_local_dir ?? "/tmp/mdwiki/repos/root");
   const [storageDir, setStorageDir] = useState(initialSettings?.storage_dir ?? "/tmp/mdwiki/state");
   const [spaceKey, setSpaceKey] = useState("main");
   const [spaceName, setSpaceName] = useState("Main Space");
+  const [spacePath, setSpacePath] = useState(initialDefaultPath ?? "spaces/main");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSpacePath((prev) => {
+      const trimmed = prev.trim();
+      if (trimmed !== "" && trimmed !== "." && !trimmed.startsWith("spaces/")) {
+        return prev;
+      }
+      if (existingRepoDetected) {
+        return ".";
+      }
+      return `spaces/${spaceKey || "main"}`;
+    });
+  }, [existingRepoDetected, initialDefaultPath, spaceKey]);
 
   const submit = async () => {
     setBusy(true);
@@ -145,6 +165,7 @@ function SetupScreen({
           storage_dir: storageDir,
           first_space_key: spaceKey,
           first_space_name: spaceName,
+          first_space_path: spacePath,
         }),
       });
       if (!r.ok) {
@@ -191,6 +212,16 @@ function SetupScreen({
           First space name
           <input value={spaceName} onChange={(e) => setSpaceName(e.target.value)} />
         </label>
+
+        <label>
+          First space path
+          <input value={spacePath} onChange={(e) => setSpacePath(e.target.value)} placeholder="spaces/main or ." />
+        </label>
+        <p style={{ marginTop: 4, color: "var(--muted, #666)", fontSize: "0.95rem" }}>
+          {existingRepoDetected
+            ? 'Existing repo detected. "." mounts the repo root. Use a subdirectory if you want room for additional spaces later.'
+            : "New or nearly empty repo detected. A subdirectory like spaces/main keeps the repo ready for multiple spaces."}
+        </p>
 
         <button type="button" onClick={() => void submit()} disabled={busy}>
           {busy ? "Creating…" : "Create wiki"}
@@ -618,7 +649,14 @@ export default function App() {
   }
 
   if (!setup.configured) {
-    return <SetupScreen initialSettings={setup.settings} onConfigured={() => void loadSetup()} />;
+    return (
+      <SetupScreen
+        initialSettings={setup.settings}
+        initialDefaultPath={setup.first_space_default_path}
+        existingRepoDetected={setup.existing_repo_detected}
+        onConfigured={() => void loadSetup()}
+      />
+    );
   }
 
   if (spaces === null) {

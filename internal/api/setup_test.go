@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -222,6 +223,67 @@ func TestListSpacesUsesRootRepoFallbacks(t *testing.T) {
 	}
 	if got[1]["repo_url"] != "https://github.com/acme/other.git" || got[1]["branch"] != "develop" {
 		t.Fatalf("other space should keep explicit repo/branch: %#v", got[1])
+	}
+}
+
+func TestSuggestedFirstSpacePath(t *testing.T) {
+	root := t.TempDir()
+	if got, populated := suggestedFirstSpacePath(root, "main"); got != "spaces/main" || populated {
+		t.Fatalf("empty repo default = (%q, %t), want (spaces/main, false)", got, populated)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("# hi"), 0o644); err != nil {
+		t.Fatalf("write readme: %v", err)
+	}
+	if got, populated := suggestedFirstSpacePath(root, "main"); got != "spaces/main" || populated {
+		t.Fatalf("readme-only repo default = (%q, %t), want (spaces/main, false)", got, populated)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "docs.md"), []byte("# docs"), 0o644); err != nil {
+		t.Fatalf("write docs: %v", err)
+	}
+	if got, populated := suggestedFirstSpacePath(root, "main"); got != "." || !populated {
+		t.Fatalf("populated repo default = (%q, %t), want (., true)", got, populated)
+	}
+}
+
+func TestSetupInitialSpaceChoosesPathByRepoShape(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "root")
+	store := &fakeSettingsStore{}
+	srv := newTestServer(t, store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/setup/init", strings.NewReader(
+		fmt.Sprintf(`{"root_repo_local_dir":%q,"first_space_key":"main","first_space_name":"Main Space"}`, root),
+	))
+	rr := httptest.NewRecorder()
+	srv.setupInitialSpace(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("setupInitialSpace empty repo status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store.saved) == 0 || store.saved[len(store.saved)-1].Spaces[0].Path != "spaces/main" {
+		t.Fatalf("empty repo first space path = %#v", store.saved)
+	}
+
+	populatedRoot := filepath.Join(t.TempDir(), "root")
+	if _, err := gitops.EnsureRepo(populatedRoot); err != nil {
+		t.Fatalf("EnsureRepo populatedRoot: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(populatedRoot, "CONTRIBUTING.md"), []byte("# contrib"), 0o644); err != nil {
+		t.Fatalf("write populated file: %v", err)
+	}
+	store2 := &fakeSettingsStore{}
+	srv2 := newTestServer(t, store2)
+
+	req = httptest.NewRequest(http.MethodPost, "/api/setup/init", strings.NewReader(
+		fmt.Sprintf(`{"root_repo_local_dir":%q,"first_space_key":"main","first_space_name":"Main Space"}`, populatedRoot),
+	))
+	rr = httptest.NewRecorder()
+	srv2.setupInitialSpace(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("setupInitialSpace populated repo status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if len(store2.saved) == 0 || store2.saved[len(store2.saved)-1].Spaces[0].Path != "." {
+		t.Fatalf("populated repo first space path = %#v", store2.saved)
 	}
 }
 

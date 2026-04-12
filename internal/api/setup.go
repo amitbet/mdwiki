@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -29,6 +30,7 @@ type setupRequest struct {
 	StorageDir     string `json:"storage_dir"`
 	FirstSpaceKey  string `json:"first_space_key"`
 	FirstSpaceName string `json:"first_space_name"`
+	FirstSpacePath string `json:"first_space_path"`
 }
 
 func absOr(value, fallback string) (string, error) {
@@ -251,11 +253,67 @@ func (s *Server) getSetupStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defaultPath, populated := suggestedFirstSpacePath(cfg.RootRepoLocalDir, "main")
 	configured := strings.TrimSpace(cfg.RootRepoURL) != "" && len(cfg.Spaces) > 0
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"configured": configured,
-		"settings":   cfg,
+		"configured":                configured,
+		"settings":                  cfg,
+		"first_space_default_path":  defaultPath,
+		"existing_repo_detected":    populated,
 	})
+}
+
+func suggestedFirstSpacePath(rootLocalDir, spaceKey string) (string, bool) {
+	key := strings.TrimSpace(strings.ToLower(spaceKey))
+	if key == "" {
+		key = "main"
+	}
+	if repoLooksPopulated(rootLocalDir) {
+		return ".", true
+	}
+	return filepath.ToSlash(filepath.Join("spaces", key)), false
+}
+
+func repoLooksPopulated(rootLocalDir string) bool {
+	entries, err := os.ReadDir(rootLocalDir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || isIgnorableBootstrapEntry(name) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isIgnorableBootstrapEntry(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
+	case ".git", ".github", ".gitignore", ".gitattributes", ".gitmodules", "license", "license.md", "license.txt", "codeowners":
+		return true
+	}
+	return strings.HasPrefix(lower, "readme")
+}
+
+func normalizeSpaceMountPath(raw string) (string, error) {
+	p := filepath.ToSlash(strings.TrimSpace(raw))
+	if p == "" || p == "." {
+		return ".", nil
+	}
+	if strings.HasPrefix(p, "/") {
+		return "", fmt.Errorf("first_space_path must be relative")
+	}
+	clean := path.Clean(p)
+	if clean == "." {
+		return ".", nil
+	}
+	if strings.HasPrefix(clean, "../") || clean == ".." {
+		return "", fmt.Errorf("first_space_path must stay within the repo")
+	}
+	return clean, nil
 }
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -404,14 +462,6 @@ func (s *Server) createSpace(w http.ResponseWriter, r *http.Request) {
 
 		spaceRoot := filepath.Join(cfg.RootRepoLocalDir, filepath.FromSlash(entry.Path))
 		if err := os.MkdirAll(spaceRoot, 0o755); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if err := gitops.EnsureSpaceMeta(spaceRoot, key); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if _, err := ensureInitialized(spaceRoot, key); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -572,24 +622,29 @@ func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	spacePath := strings.TrimSpace(body.FirstSpacePath)
+	if spacePath == "" {
+		spacePath, _ = suggestedFirstSpacePath(cfg.RootRepoLocalDir, spaceKey)
+	}
+	spacePath, err = normalizeSpaceMountPath(spacePath)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	cfg.Spaces = []appsettings.SpaceEntry{{
 		Key:         spaceKey,
 		DisplayName: spaceName,
 		CreatedBy:   s.sessionLogin(r),
-		Path:        ".",
+		Path:        spacePath,
 		Branch:      cfg.RootRepoBranch,
 	}}
 
 	spaceRoot := cfg.RootRepoLocalDir
+	if spacePath != "." {
+		spaceRoot = filepath.Join(cfg.RootRepoLocalDir, filepath.FromSlash(spacePath))
+	}
 	if err := os.MkdirAll(spaceRoot, 0o755); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := gitops.EnsureSpaceMeta(spaceRoot, spaceKey); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if _, err := ensureInitialized(spaceRoot, spaceKey); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
