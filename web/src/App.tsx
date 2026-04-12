@@ -391,16 +391,6 @@ export default function App() {
     if (!session || !setup?.configured) {
       return;
     }
-    let stopped = false;
-    const tick = async () => {
-      if (stopped || document.hidden) {
-        return;
-      }
-      await loadSpaces();
-    };
-    const id = window.setInterval(() => {
-      void tick();
-    }, 5000);
     const onFocus = () => {
       void loadSpaces();
     };
@@ -412,8 +402,6 @@ export default function App() {
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      stopped = true;
-      window.clearInterval(id);
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
