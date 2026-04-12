@@ -10,8 +10,12 @@ import Underline from "@tiptap/extension-underline";
 import { EditorContent, useEditor } from "@tiptap/react";
 import FormatBoldIcon from "@mui/icons-material/FormatBold";
 import FormatItalicIcon from "@mui/icons-material/FormatItalic";
+import FormatListBulletedIcon from "@mui/icons-material/FormatListBulleted";
+import FormatListNumberedIcon from "@mui/icons-material/FormatListNumbered";
 import FormatUnderlinedIcon from "@mui/icons-material/FormatUnderlined";
+import ImageIcon from "@mui/icons-material/Image";
 import InsertLinkIcon from "@mui/icons-material/InsertLink";
+import ChecklistIcon from "@mui/icons-material/Checklist";
 import StrikethroughSIcon from "@mui/icons-material/StrikethroughS";
 import { createLowlight } from "lowlight";
 import bash from "highlight.js/lib/languages/bash";
@@ -27,8 +31,10 @@ import yaml from "highlight.js/lib/languages/yaml";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as Y from "yjs";
 import { DiagramPreview } from "./DiagramPreview";
+import { handleEditorTab } from "./editorTab";
 import { htmlToMarkdown } from "./md/htmlToMarkdown";
 import { renderGFM } from "./md/render";
+import { normalizeMarkdownForComparison } from "./md/whitespace";
 
 export type SpaceInfo = {
   key: string;
@@ -252,11 +258,7 @@ lowlight.register("vega", json);
 lowlight.register("plantuml", plaintext);
 
 function canonicalMarkdown(input: string): string {
-  return input
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+$/gm, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trimEnd();
+  return normalizeMarkdownForComparison(input);
 }
 
 function escapeHTML(s: string): string {
@@ -639,6 +641,7 @@ export default function WikiEditor({
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [viewMode, setViewMode] = useState<"rendered" | "markdown">("rendered");
   const [error, setError] = useState<string | null>(null);
   const [lastErrorDetails, setLastErrorDetails] = useState<string>("");
   const [errorDetailsOpen, setErrorDetailsOpen] = useState(false);
@@ -709,7 +712,7 @@ export default function WikiEditor({
   const metadataEnabled = pageInfo.metadata_enabled;
   const interactionLocked = readOnly || !repoReady;
   const canEdit = isEditing && !interactionLocked;
-  const canComment = !interactionLocked;
+  const canComment = !interactionLocked && (isEditing || viewMode === "rendered");
 
   const ydoc = useMemo(() => new Y.Doc(), [editorSession, space, path]);
   const CommentHighlight = useMemo(
@@ -758,13 +761,7 @@ export default function WikiEditor({
           class: "wysiwyg-editor md-preview",
         },
         handleKeyDown(view, event) {
-          if (event.key !== "Tab") {
-            return false;
-          }
-          event.preventDefault();
-          const { from, to } = view.state.selection;
-          view.dispatch(view.state.tr.insertText("\t", from, to).scrollIntoView());
-          return true;
+          return handleEditorTab(view, event);
         },
       },
       onUpdate({ editor: ed }) {
@@ -926,7 +923,12 @@ export default function WikiEditor({
       }
       const normalizedIncoming = canonicalMarkdown(md);
       const normalizedCurrent = canonicalMarkdown(markdownRef.current);
-      if (normalizedIncoming === normalizedCurrent && normalizedIncoming === canonicalMarkdown(lastSavedMarkdownRef.current)) {
+      const normalizedEditor = canonicalMarkdown(htmlToMarkdown(editor.getHTML()));
+      if (
+        normalizedIncoming === normalizedCurrent &&
+        normalizedIncoming === canonicalMarkdown(lastSavedMarkdownRef.current) &&
+        normalizedIncoming === normalizedEditor
+      ) {
         markdownRef.current = md;
         setMarkdown(md);
         setDirty(false);
@@ -938,7 +940,12 @@ export default function WikiEditor({
       markdownRef.current = md;
       setMarkdown(md);
       setDirty(false);
-      editor.commands.setContent(html, { emitUpdate: true });
+      editor.commands.setContent(html, {
+        emitUpdate: true,
+        parseOptions: {
+          preserveWhitespace: "full",
+        },
+      });
     },
     [editor, suppressDirtyTrackingForTick],
   );
@@ -955,7 +962,12 @@ export default function WikiEditor({
       isEditingRef.current = true;
       dirtyRef.current = restoredDirty;
       setMarkdown(md);
-      editor.commands.setContent(html, { emitUpdate: true });
+      editor.commands.setContent(html, {
+        emitUpdate: true,
+        parseOptions: {
+          preserveWhitespace: "full",
+        },
+      });
       setIsEditing(true);
       setDirty(restoredDirty);
     },
@@ -2616,16 +2628,19 @@ export default function WikiEditor({
         <button type="button" className="top-icon-btn" title="Toggle theme" onClick={onToggleTheme}>
           {theme === "dark" ? (
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" fill="currentColor" />
               <path
-                d="M12 4.5a1 1 0 0 1 1 1v1.75a1 1 0 1 1-2 0V5.5a1 1 0 0 1 1-1Zm0 11.75a1 1 0 0 1 1 1V19a1 1 0 1 1-2 0v-1.75a1 1 0 0 1 1-1Zm7.5-5.25a1 1 0 0 1 1 1 1 1 0 0 1-1 1h-1.75a1 1 0 1 1 0-2H19.5ZM7.25 12a1 1 0 1 1 0 2H5.5a1 1 0 1 1 0-2h1.75Zm8.05-4.8a1 1 0 0 1 1.41 0l1.24 1.24a1 1 0 1 1-1.42 1.41L15.3 8.6a1 1 0 0 1 0-1.41Zm-8.24 8.24a1 1 0 0 1 1.41 0l1.24 1.24a1 1 0 1 1-1.41 1.42l-1.24-1.25a1 1 0 0 1 0-1.41Zm10.89.59a1 1 0 0 1 0 1.41l-1.24 1.25a1 1 0 1 1-1.41-1.42l1.24-1.24a1 1 0 0 1 1.41 0ZM9.71 8.6a1 1 0 1 1-1.41 1.41L7.06 8.77A1 1 0 0 1 8.47 7.36L9.7 8.6Zm2.29 1.65a2.75 2.75 0 1 1 0 5.5 2.75 2.75 0 0 1 0-5.5Z"
-                fill="currentColor"
+                d="M12 2.75v2.1M12 19.15v2.1M21.25 12h-2.1M4.85 12h-2.1M18.54 5.46l-1.49 1.49M6.95 17.05l-1.49 1.49M18.54 18.54l-1.49-1.49M6.95 6.95L5.46 5.46"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
               />
             </svg>
           ) : (
             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
               <path
-                d="M14.5 2.6a1 1 0 0 1 .8 1.63A7.5 7.5 0 1 0 19.77 8.7a1 1 0 0 1 1.63.8c0 6.07-4.93 11-11 11S-.6 15.57-.6 9.5 4.33-1.5 10.4-1.5a1 1 0 0 1 .8 1.63A7.49 7.49 0 0 0 14.5 2.6Z"
-                transform="translate(1.6 3.5)"
+                d="M16.75 14.5A7.25 7.25 0 0 1 9.5 7.25c0-1.46.43-2.82 1.16-3.97A8.75 8.75 0 1 0 20.72 13.34a7.2 7.2 0 0 1-3.97 1.16Z"
                 fill="currentColor"
               />
             </svg>
@@ -2715,6 +2730,28 @@ export default function WikiEditor({
             </div>
           ) : null}
           <div className="editor-toolbar">
+            <div className="view-mode-toggle" role="tablist" aria-label="Document view mode">
+              <button
+                type="button"
+                className={`tool-btn tool-btn-text ${viewMode === "rendered" ? "is-active" : ""}`}
+                aria-pressed={viewMode === "rendered"}
+                onClick={() => setViewMode("rendered")}
+                disabled={isEditing}
+                title={isEditing ? "Rendered view is unavailable while editing" : "Show rendered document"}
+              >
+                Rendered
+              </button>
+              <button
+                type="button"
+                className={`tool-btn tool-btn-text ${viewMode === "markdown" ? "is-active" : ""}`}
+                aria-pressed={viewMode === "markdown"}
+                onClick={() => setViewMode("markdown")}
+                disabled={isEditing}
+                title={isEditing ? "Markdown view is unavailable while editing" : "Show raw markdown"}
+              >
+                Markdown
+              </button>
+            </div>
             <select
               className="tool-select"
               value={headingValue}
@@ -2756,20 +2793,35 @@ export default function WikiEditor({
             <IconButton title="Link" active={!!editor?.isActive("link")} onClick={insertLink} disabled={!canEdit}>
               <InsertLinkIcon fontSize="small" />
             </IconButton>
-            <button type="button" className="tool-btn tool-btn-text" onClick={triggerImageUpload} disabled={!canEdit}>
-              Image
-            </button>
-            <button
-              type="button"
-              className="tool-btn tool-btn-text"
+            <IconButton
+              title="Bulleted List"
+              active={!!editor?.isActive("bulletList")}
+              onClick={() => editor?.chain().focus().toggleBulletList().run()}
+              disabled={!canEdit}
+            >
+              <FormatListBulletedIcon className="tool-btn-list-icon" />
+            </IconButton>
+            <IconButton
+              title="Numbered List"
+              active={!!editor?.isActive("orderedList")}
+              onClick={() => editor?.chain().focus().toggleOrderedList().run()}
+              disabled={!canEdit}
+            >
+              <FormatListNumberedIcon className="tool-btn-list-icon" />
+            </IconButton>
+            <IconButton
+              title="Task"
               onClick={() => {
                 setTaskDraft({ title: "", assignee: "", priority: "", dueDate: "", collectable: false });
                 setTaskModalOpen(true);
               }}
               disabled={!canEdit}
             >
-              Task
-            </button>
+              <ChecklistIcon className="tool-btn-list-icon" />
+            </IconButton>
+            <IconButton title="Image" onClick={triggerImageUpload} disabled={!canEdit}>
+              <ImageIcon />
+            </IconButton>
             <button type="button" className="tool-btn tool-btn-text" onClick={() => void createDiagramAsset("excalidraw")} disabled={!canEdit}>
               Excalidraw
             </button>
@@ -2825,6 +2877,12 @@ export default function WikiEditor({
             <div
               className="editor-container"
               onMouseMove={(e) => {
+                if (!isEditing && viewMode === "markdown") {
+                  codeLangHoverRef.current = false;
+                  setCodeLangHover(null);
+                  scheduleHidePopover();
+                  return;
+                }
                 const target = e.target as HTMLElement | null;
                 if (target?.closest(".code-lang-pop")) {
                   return;
@@ -2868,7 +2926,7 @@ export default function WikiEditor({
                 scheduleHidePopover();
               }}
               onContextMenu={(e) => {
-                if (!editor || !canComment) {
+                if (!editor || !canComment || (!isEditing && viewMode === "markdown")) {
                   return;
                 }
                 e.preventDefault();
@@ -2922,8 +2980,8 @@ export default function WikiEditor({
                   void uploadImageAndInsert(file).catch((err) => setError(err instanceof Error ? err.message : "image upload failed"));
                 }}
               />
-              <EditorContent editor={editor} />
-              <DiagramPreview active={!isEditing} contentKey={markdown} theme={theme} />
+              {isEditing || viewMode === "rendered" ? <EditorContent editor={editor} /> : <pre className="markdown-source-view">{markdown}</pre>}
+              <DiagramPreview active={!isEditing && viewMode === "rendered"} contentKey={markdown} theme={theme} />
               {codeLangHover ? (
                 <div
                   className="code-lang-pop"

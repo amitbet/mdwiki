@@ -240,6 +240,30 @@ func TestSavePageLocalAndErrString(t *testing.T) {
 	}
 }
 
+func TestSavePageLocalPreservesTabBytes(t *testing.T) {
+	srv, store := newServerWithSpace(t, "local")
+	root := filepath.Join(store.load.RootRepoLocalDir, "spaces", "main")
+	if _, err := ensureInitialized(root, "main"); err != nil {
+		t.Fatalf("ensureInitialized: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/spaces/main/page", strings.NewReader("{\"path\":\"docs/tabs\",\"content\":\"\\talpha\\n\\n beta\"}"))
+	req = withURLParam(req, "space", "main")
+	rr := httptest.NewRecorder()
+	srv.savePage(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("savePage status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(root, "docs", "tabs.md"))
+	if err != nil {
+		t.Fatalf("read saved page: %v", err)
+	}
+	if string(data) != "\talpha\n\n beta" {
+		t.Fatalf("saved page content = %q", string(data))
+	}
+}
+
 func TestPushHelpersPreferSessionToken(t *testing.T) {
 	srv, _ := newServerWithSpace(t, "local")
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

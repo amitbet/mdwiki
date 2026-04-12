@@ -10,6 +10,43 @@ const td = new TurndownService({
 
 td.use([gfm, tables, strikethrough]);
 
+const TAB_SENTINEL = "\uE000";
+
+function preserveVisibleSpaces(text: string): string {
+  return text
+    .replace(/^ +/g, (match) => "\u00a0".repeat(match.length))
+    .replace(/ {2,}/g, (match) => ` ${"\u00a0".repeat(match.length - 1)}`)
+    .replace(/ +$/g, (match) => "\u00a0".repeat(match.length));
+}
+
+function prepareHTMLForWhitespacePreservation(html: string): string {
+  if (typeof DOMParser === "undefined") {
+    return html;
+  }
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let current = walker.nextNode();
+  while (current) {
+    textNodes.push(current as Text);
+    current = walker.nextNode();
+  }
+  for (const node of textNodes) {
+    const parent = node.parentElement;
+    if (!parent) {
+      continue;
+    }
+    if (parent.closest("pre, code")) {
+      continue;
+    }
+    if (!/[ \t]{2,}|^[ \t]|[ \t]$/.test(node.data)) {
+      continue;
+    }
+    node.data = preserveVisibleSpaces(node.data).replace(/\t/g, TAB_SENTINEL);
+  }
+  return doc.body.innerHTML;
+}
+
 function commentIdFromNode(node: HTMLElement): string {
   const direct = (node.getAttribute("data-wiki-comment") || "").trim();
   if (direct) {
@@ -114,6 +151,25 @@ td.addRule("wikiTaskBlock", {
   },
 });
 
+td.addRule("emptyParagraph", {
+  filter(node) {
+    if (!(node instanceof HTMLElement) || node.tagName !== "P") {
+      return false;
+    }
+    const text = (node.textContent || "").replace(/\u00a0/g, "").trim();
+    const childNodes = Array.from(node.childNodes);
+    if (text.length > 0) {
+      return false;
+    }
+    return childNodes.length === 0 || childNodes.every((child) => {
+      return child.nodeType === Node.ELEMENT_NODE && (child as HTMLElement).tagName === "BR";
+    });
+  },
+  replacement() {
+    return "\n<!-- mdwiki:blank-line -->\n";
+  },
+});
+
 td.addRule("mdwikiDiagram", {
   filter(node) {
     return node instanceof HTMLElement && node.tagName === "DIV" && node.hasAttribute("data-mdwiki-diagram");
@@ -152,7 +208,66 @@ td.addRule("imageWithSafeDestination", {
   },
 });
 
+function encodeVisibleSpaces(text: string): string {
+  return text
+    .replace(/^ +/, (match) => "&nbsp;".repeat(match.length))
+    .replace(/^\u00a0+/, (match) => "&nbsp;".repeat(match.length))
+    .replace(/ {2,}/g, (match) => ` ${"&nbsp;".repeat(match.length - 1)}`)
+    .replace(/\u00a0{2,}/g, (match) => "&nbsp;".repeat(match.length))
+    .replace(/ \u00a0+/g, (match) => ` ${"&nbsp;".repeat(match.length - 1)}`)
+    .replace(/ +$/g, (match) => "&nbsp;".repeat(match.length));
+}
+
+function encodeIndentedPlaintext(markdown: string): string {
+  const lines = markdown.split("\n");
+  const out: string[] = [];
+  let fencedBy = "";
+  for (const line of lines) {
+    const normalized = line.replace(
+      /^\u00a0+/,
+      (match) => "\t".repeat(Math.floor(match.length / 4)) + " ".repeat(match.length % 4),
+    );
+    const trimmed = normalized.trimStart();
+    const fenceMatch = trimmed.match(/^(```+|~~~+)/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      if (!fencedBy) {
+        fencedBy = marker;
+      } else if (fencedBy === marker) {
+        fencedBy = "";
+      }
+      out.push(normalized);
+      continue;
+    }
+    if (fencedBy) {
+      out.push(normalized);
+      continue;
+    }
+    const leadingIndent = normalized.match(/^[ \t]+/)?.[0] ?? "";
+    if (leadingIndent.length === 0) {
+      out.push(normalized);
+      continue;
+    }
+    if (
+      trimmed === "" ||
+      /^(?:<!--\s*mdwiki:blank-line\s*-->|`{3,}|~{3,}|\|)/.test(trimmed)
+    ) {
+      out.push(normalized);
+      continue;
+    }
+    const prefixMatch = normalized.match(/^(\s{0,3}(?:(?:>\s*)?(?:(?:[-+*]|\d+[.)])\s+)?))/);
+    const prefix = prefixMatch?.[0] ?? "";
+    const rest = normalized.slice(prefix.length);
+    if (/^(?:[#>]|[-+*]\s|\d+[.)]\s)/.test(trimmed) && prefix.length > 0) {
+      out.push(`${prefix}${encodeVisibleSpaces(rest)}`);
+      continue;
+    }
+    out.push(encodeVisibleSpaces(normalized));
+  }
+  return out.join("\n");
+}
+
 export function htmlToMarkdown(html: string): string {
-  const out = td.turndown(html).replace(/\n{3,}/g, "\n\n").trim();
-  return out.length > 0 ? `${out}\n` : "";
+  const out = encodeIndentedPlaintext(td.turndown(prepareHTMLForWhitespacePreservation(html)).replaceAll(TAB_SENTINEL, "\t"));
+  return out.length > 0 ? out.replace(/\s+$/, "") + "\n" : "";
 }
