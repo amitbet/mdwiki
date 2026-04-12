@@ -3,6 +3,7 @@ package api
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,34 @@ func TestNormalizeAssetRelPath(t *testing.T) {
 		if got != tt.want {
 			t.Fatalf("normalizeAssetRelPath(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestMediaHelpers(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: " diagram name.drawio ", want: "diagram-name.drawio"},
+		{in: `folder\diagram?.drawio`, want: "folder-diagram-.drawio"},
+		{in: "   ", want: "asset"},
+	}
+	for _, tt := range tests {
+		if got := sanitizeAssetName(tt.in); got != tt.want {
+			t.Fatalf("sanitizeAssetName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+
+	if got := diagramTemplate("excalidraw"); !strings.Contains(got, `"type": "excalidraw"`) {
+		t.Fatalf("excalidraw template mismatch: %q", got)
+	}
+	if got := diagramTemplate("drawio"); !strings.Contains(got, "<mxfile") {
+		t.Fatalf("drawio template mismatch: %q", got)
+	}
+
+	url := assetURL("main docs", ".mdwiki/assets/images/my file.png")
+	if url != "/api/spaces/main%20docs/asset?path=.mdwiki%2Fassets%2Fimages%2Fmy+file.png" {
+		t.Fatalf("assetURL mismatch: %q", url)
 	}
 }
 
