@@ -67,90 +67,37 @@ go run ./cmd/wiki
 
 Health: `GET http://localhost:8080/health`
 
-### Git auth in a real corporate setup
+### GitHub OAuth setup
 
-For production, treat git auth as two separate concerns:
+If you want GitHub sign-in, create a GitHub OAuth App and copy its values into mdwiki.
 
-1. **User identity**: users sign in with GitHub OAuth so mdwiki can attribute edits and, when available, push with the user token.
-2. **Server fallback / bootstrap auth**: the server keeps a non-user credential in `MDWIKI_SERVER_GIT_TOKEN` so clones, pulls, and pushes still work before a user signs in or when a background/server-side git operation runs.
-
-Recommended setup:
-
-- Use **HTTPS** repo URLs in `spaces-registry.yaml` and `MDWIKI_ROOT_GIT_REPO`. The current git integration authenticates with tokens over HTTPS; do not use SSH remotes for managed corporate deployment.
-- Create a **GitHub OAuth App** for mdwiki and configure:
-  - `MDWIKI_GITHUB_CLIENT_ID`
-  - `MDWIKI_GITHUB_CLIENT_SECRET`
-  - `MDWIKI_GITHUB_CALLBACK`
-- The app currently requests GitHub scopes: `read:user`, `user:email`, and `repo`. In most companies, that means the OAuth app must be reviewed/approved by the GitHub organization before end users can sign in successfully.
-- Set `MDWIKI_SERVER_GIT_TOKEN` to a dedicated machine credential with read/write access to every wiki repo mdwiki manages. In practice this is usually:
-  - a bot/service account PAT, or
-  - an installation/access token from your internal credential broker if your company rotates tokens centrally.
-- If your GitHub organization enforces **SAML SSO**, make sure both of these are authorized for the org:
-  - the mdwiki OAuth app
-  - the token behind `MDWIKI_SERVER_GIT_TOKEN`
-- Keep the server token separate from personal user credentials. This avoids outages when an employee leaves, rotates devices, or loses repo access unexpectedly.
-- Prefer a bot account with the smallest repo access footprint that still covers all configured spaces.
-
-Example production env:
-
-```bash
-export MDWIKI_ROOT_GIT_REPO=https://github.example.com/Docs/platform-wiki.git
-export MDWIKI_GITHUB_CLIENT_ID=...
-export MDWIKI_GITHUB_CLIENT_SECRET=...
-export MDWIKI_GITHUB_CALLBACK=https://wiki.example.com/auth/github/callback
-export MDWIKI_SERVER_GIT_TOKEN=...
-```
-
-How to get the GitHub values:
-
-1. In GitHub, go to **Settings** -> **Developer settings** -> **OAuth apps** -> **New OAuth App**.
-2. Fill in:
-   - **Application name**: a user-facing name such as `mdwiki Production`
-   - **Homepage URL**: the public wiki URL, for example `https://wiki.example.com`
-   - **Authorization callback URL**: the mdwiki backend callback endpoint, for example `https://wiki.example.com/auth/github/callback`
-3. If you want mdwiki's device sign-in flow, enable **Device Flow** before you register or later from the OAuth app settings page.
-4. Click **Register application**.
-5. On the OAuth app page:
+1. In GitHub, go to **Settings** -> **Developer settings** -> **OAuth Apps** -> **New OAuth App**.
+2. Fill in the app form:
+   - **Application name**: anything user-facing, for example `mdwiki local`
+   - **Homepage URL**: `<frontend-origin>`
+   - **Authorization callback URL**: `<backend-origin>/auth/github/callback`
+3. Click **Register application**.
+4. On the OAuth app page:
    - copy **Client ID** into `MDWIKI_GITHUB_CLIENT_ID`
    - click **Generate a new client secret**
-   - copy that value into `MDWIKI_GITHUB_CLIENT_SECRET`
-6. Set `MDWIKI_GITHUB_CALLBACK` to the same callback URL you configured in GitHub.
+   - copy that secret into `MDWIKI_GITHUB_CLIENT_SECRET`
+5. Set `MDWIKI_GITHUB_CALLBACK` to the same callback URL you entered in GitHub: `<backend-origin>/auth/github/callback`
 
-Important GitHub behavior:
+Template values:
 
-- GitHub OAuth Apps support only **one callback URL** per app. In practice, create separate OAuth apps for `local`, `staging`, and `production`.
-- The callback URL should point to the mdwiki backend route `/auth/github/callback`, not just the site root.
-- mdwiki starts the browser flow on `/auth/github` and GitHub redirects the user's browser back to `/auth/github/callback`.
-- If you use the device flow, mdwiki also uses:
-  - `POST /auth/github/device/start`
-  - `GET /auth/github/device/poll`
-- GitHub's redirect URI rules are strict: host and port must match the configured callback, and the path must match that callback path or a subpath.
-- GitHub references:
-  - OAuth flow and redirect URL rules: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps
-  - Creating an OAuth app: https://github.com/settings/applications/new
-  - Managing an existing OAuth app: https://github.com/settings/developers
+- `<frontend-origin>`: where the UI is served, for example `http://localhost:3000`
+- `<backend-origin>`: where the Go server is served, for example `http://localhost:8080`
+- OAuth callback/whitelist URL: `<backend-origin>/auth/github/callback`
 
-What to whitelist, and where:
+Example:
 
-- In your **reverse proxy / ingress / API gateway**, route these paths to the Go backend:
-  - `GET /auth/github`
-  - `GET /auth/github/callback`
-  - `POST /auth/github/device/start`
-  - `GET /auth/github/device/poll`
-- In your **identity-aware proxy / SSO middleware / auth gateway** that sits in front of mdwiki, allow these same `/auth/github*` endpoints to complete their flow without being trapped in another login challenge or redirect loop.
-- If you keep a frontend and backend on different public origins, make sure:
-  - `MDWIKI_GITHUB_CALLBACK` points at the backend origin
-  - `MDWIKI_FRONTEND_ORIGIN` points at the UI origin, because after a successful GitHub login mdwiki redirects the browser back to `MDWIKI_FRONTEND_ORIGIN/`
-- In GitHub organization settings, if OAuth app access restrictions are enabled, org owners must approve the mdwiki OAuth app under:
-  - **Organizations** -> your org -> **Settings** -> **Third-party Access** -> **OAuth app policy**
-- If your org limits who can request app approval, review that under:
-  - **Organizations** -> your org -> **Settings** -> **Member privileges** -> **App access requests**
+```bash
+export MDWIKI_GITHUB_CLIENT_ID=...
+export MDWIKI_GITHUB_CLIENT_SECRET=...
+export MDWIKI_GITHUB_CALLBACK=http://localhost:8080/auth/github/callback
+```
 
-Operational notes:
-
-- A signed-in user’s GitHub token is preferred for push/authorship; if there is no user session token, mdwiki falls back to `MDWIKI_SERVER_GIT_TOKEN`.
-- For locked-down developer laptops or VDI environments, the built-in **device flow** can be easier to roll out than browser callback auth, but it still requires the same GitHub org approval and token/SAML authorization.
-- Store `MDWIKI_SERVER_GIT_TOKEN` in your normal secret manager or runtime secret injection system; do not commit it to `.env`, `local.mk`, or container images.
+If mdwiki also needs to clone or push without a signed-in user, set `MDWIKI_SERVER_GIT_TOKEN` to a GitHub token with repo access.
 
 ### Frontend only
 
