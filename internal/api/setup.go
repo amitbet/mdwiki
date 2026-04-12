@@ -411,6 +411,10 @@ func (s *Server) createSpace(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if _, err := ensureInitialized(spaceRoot, key); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	} else if entry.Branch == "" {
 		entry.Branch = "main"
 	}
@@ -585,12 +589,9 @@ func (s *Server) setupInitialSpace(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	readme := filepath.Join(spaceRoot, "README.md")
-	if _, err := os.Stat(readme); errors.Is(err, os.ErrNotExist) {
-		if err := os.WriteFile(readme, []byte("# Welcome\n\nStart writing in your new wiki space.\n"), 0o644); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if _, err := ensureInitialized(spaceRoot, spaceKey); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	if err := s.saveSettings(r.Context(), cfg); err != nil {

@@ -207,6 +207,9 @@ func TestGitHubDevicePollPendingAndExpired(t *testing.T) {
 func TestSavePageLocalAndErrString(t *testing.T) {
 	srv, store := newServerWithSpace(t, "local")
 	root := filepath.Join(store.load.RootRepoLocalDir, "spaces", "main")
+	if _, err := ensureInitialized(root, "main"); err != nil {
+		t.Fatalf("ensureInitialized: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/spaces/main/page", strings.NewReader(`{"path":"docs/test","content":"# Hello"}`))
 	req = withURLParam(req, "space", "main")

@@ -29,6 +29,7 @@ type Config struct {
 	RedisPassword     string
 	ServerGitToken    string // PAT or app token for clone/fallback push
 	FrontendOrigin    string // CORS
+	UseMetadata       bool
 }
 
 func FromEnv() Config {
@@ -54,6 +55,7 @@ func FromEnv() Config {
 		RedisPassword:     os.Getenv("MDWIKI_REDIS_PASSWORD"),
 		ServerGitToken:    os.Getenv("MDWIKI_SERVER_GIT_TOKEN"),
 		FrontendOrigin:    get("MDWIKI_FRONTEND_ORIGIN", "http://localhost:5173"),
+		UseMetadata:       Bool("MDWIKI_USE_METADATA", false),
 	}
 }
 

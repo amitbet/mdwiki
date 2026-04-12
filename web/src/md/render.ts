@@ -15,6 +15,10 @@ function expandCommentMarkers(markdown: string): string {
     /<!--\s*wiki:comment:start:([a-zA-Z0-9_-]+)\s*-->([\s\S]*?)<!--\s*wiki:comment:end:\1\s*-->/g,
     '<mark data-wiki-comment="$1" class="wiki-comment-highlight wiki-comment-id-$1">$2</mark>',
   );
+  out = out.replace(
+    /<!--\s*wiki:tasks:start\s*-->([\s\S]*?)<!--\s*wiki:tasks:end\s*-->/g,
+    '<div data-wiki-task-block="true">$1</div>',
+  );
   return out;
 }
 
@@ -25,7 +29,7 @@ const processor = unified()
   .use(rehypeRaw)
   .use(rehypeSanitize, {
     ...defaultSchema,
-    tagNames: [...(defaultSchema.tagNames ?? []), "mark", "div"],
+    tagNames: [...(defaultSchema.tagNames ?? []), "mark", "div", "input"],
     attributes: {
       ...(defaultSchema.attributes ?? {}),
       pre: [...(((defaultSchema.attributes ?? {}).pre as any[]) ?? []), "className"],
@@ -33,9 +37,16 @@ const processor = unified()
       div: [
         ...(((defaultSchema.attributes ?? {}).div as any[]) ?? []),
         "className",
+        ["data-wiki-task-block", /^(true)$/],
         ["data-mdwiki-diagram", /^.+$/],
         ["data-mdwiki-kind", /^(excalidraw|drawio)$/],
         ["data-mdwiki-name", /^.+$/],
+      ],
+      input: [
+        ...(((defaultSchema.attributes ?? {}).input as any[]) ?? []),
+        "checked",
+        "disabled",
+        "type",
       ],
       mark: [
         ...(((defaultSchema.attributes ?? {}).mark as any[]) ?? []),

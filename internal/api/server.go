@@ -128,13 +128,17 @@ func (s *Server) Router() http.Handler {
 	r.Get("/auth/github/callback", s.githubCallback)
 	r.Post("/auth/github/device/start", s.githubDeviceStart)
 	r.Get("/auth/github/device/poll", s.githubDevicePoll)
+	r.Post("/auth/logout", s.logout)
 
 	r.Get("/api/spaces/{space}/page", s.getPage)
 	r.Get("/api/spaces/{space}/pages", s.listPages)
+	r.Get("/api/spaces/{space}/file", s.repoFile)
 	r.Get("/api/git-jobs/{jobID}", s.getGitJob)
+	r.Post("/api/spaces/{space}/initialize", s.initializeSpace)
 	r.Post("/api/spaces/{space}/pages", s.createPage)
 	r.Delete("/api/spaces/{space}/pages", s.deletePage)
 	r.Post("/api/spaces/{space}/pages/rename", s.renamePage)
+	r.Post("/api/spaces/{space}/templates/apply", s.applyTemplate)
 	r.Get("/api/spaces/{space}/draft", s.getDraft)
 	r.Post("/api/spaces/{space}/draft", s.saveDraft)
 	r.Delete("/api/spaces/{space}/draft", s.deleteDraft)
@@ -413,6 +417,10 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown space", http.StatusNotFound)
 		return
 	}
+	if !spaceInitialized(root) {
+		http.Error(w, "space not initialized; initialize mdwiki for this repo first", http.StatusConflict)
+		return
+	}
 	cfg, err := s.loadSettings(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -501,6 +509,9 @@ func (s *Server) savePage(w http.ResponseWriter, r *http.Request) {
 	if clearErr := s.deleteDraftForPath(r.Context(), r, spaceKey, root, ent.Branch, body.Path); clearErr != nil {
 		log.Printf("draft clear after page save failed: space=%s path=%s err=%v", spaceKey, body.Path, clearErr)
 	}
+	if _, err := s.syncIndexFile(r.Context(), r, root, spaceKey, ent.Branch); err != nil {
+		log.Printf("index sync after save failed: space=%s path=%s err=%v", spaceKey, body.Path, err)
+	}
 	s.Hub.BroadcastControlToSpace(spaceKey, wshub.Control{
 		Type:   wshub.MsgPageSaved,
 		Path:   body.Path,
@@ -567,7 +578,6 @@ func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown space", http.StatusNotFound)
 		return
 	}
-	_ = gitops.EnsureSpaceMeta(root, spaceKey)
 	b, err := gitops.ReadFile(root, path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -581,11 +591,37 @@ func (s *Server) getPage(w http.ResponseWriter, r *http.Request) {
 	if repoRoot, repoRelPath, mapErr := resolveRepoPath(root, path); mapErr == nil {
 		baseCommit, _ = gitops.LastCommitForPath(repoRoot, repoRelPath)
 	}
+	meta, metaErr := pageMetadataForPath(root, path, s.Cfg.UseMetadata)
+	if metaErr != nil {
+		http.Error(w, metaErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	outgoing := []any{}
+	if meta != nil {
+		for _, link := range meta.Links {
+			outgoing = append(outgoing, link)
+		}
+	}
+	incoming, err := s.incomingLinks(root, path)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{
-		"path":        path,
-		"content":     string(b),
-		"base_commit": baseCommit,
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"path":             path,
+		"content":          string(b),
+		"base_commit":      baseCommit,
+		"initialized":      spaceInitialized(root),
+		"mdwiki_present":   spaceHasWikiDir(root),
+		"metadata_enabled": s.Cfg.UseMetadata,
+		"page_id":          pageIDForPath(root, path),
+		"title":            strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)),
+		"metadata":         meta,
+		"headings":         extractHeadings(string(b)),
+		"outgoing_links":   outgoing,
+		"incoming_links":   incoming,
+		"tasks":            extractTasks(string(b), path),
 	})
 }
 
@@ -674,26 +710,40 @@ func (s *Server) reindexSpace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer db.Close()
+	doc, err := indexbuilder.ScanMarkdown(root, spaceKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	n := 0
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		if !strings.HasSuffix(path, ".md") {
-			return nil
-		}
-		rel, _ := filepath.Rel(root, path)
-		b, err := os.ReadFile(path)
+	for _, page := range doc.Pages {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(page.Path)))
 		if err != nil {
-			return nil
+			continue
 		}
-		title := strings.TrimSuffix(filepath.Base(path), ".md")
-		if err := search.UpsertPage(db, rel, title, string(b)); err != nil {
+		searchBody := string(b)
+		if s.Cfg.UseMetadata {
+			meta, err := pageMetadataForPath(root, page.Path, true)
+			if err == nil && meta != nil {
+				parts := []string{
+					meta.Summary,
+					meta.DocType,
+					meta.Status,
+					strings.Join(meta.Owners, " "),
+					strings.Join(meta.Reviewers, " "),
+					strings.Join(meta.Tags, " "),
+				}
+				for _, link := range meta.Links {
+					parts = append(parts, link.Rel, link.TargetPath, link.TargetPageID, link.Title)
+				}
+				searchBody = strings.TrimSpace(strings.Join(parts, "\n")) + "\n\n" + searchBody
+			}
+		}
+		if err := search.UpsertPage(db, page.Path, page.Title, searchBody); err != nil {
 			log.Printf("index upsert: %v", err)
 		}
 		n++
-		return nil
-	})
+	}
 	_ = json.NewEncoder(w).Encode(map[string]int{"indexed": n})
 }
 
@@ -838,6 +888,23 @@ func (s *Server) devLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   86400,
 	})
 	http.Redirect(w, r, s.Cfg.FrontendOrigin+"/", http.StatusFound)
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	sid := sessionFromCookie(r)
+	if sid != "" {
+		s.Sessions.Delete(sid)
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     "mdwiki_session",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   -1,
+	})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 func (s *Server) rebuildRoutingIndex(w http.ResponseWriter, r *http.Request) {

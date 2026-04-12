@@ -4,6 +4,8 @@ import Highlight from "@tiptap/extension-highlight";
 import Image from "@tiptap/extension-image";
 import Link from "@tiptap/extension-link";
 import StarterKit from "@tiptap/starter-kit";
+import TaskItem from "@tiptap/extension-task-item";
+import TaskList from "@tiptap/extension-task-list";
 import Underline from "@tiptap/extension-underline";
 import { EditorContent, useEditor } from "@tiptap/react";
 import FormatBoldIcon from "@mui/icons-material/FormatBold";
@@ -91,6 +93,7 @@ type Props = {
   space: string;
   onSpaceChange: (key: string) => void;
   onSpacesChanged: () => Promise<void> | void;
+  onLogout: () => Promise<void> | void;
   currentUserLogin: string;
   path: string;
   onPathChange: (p: string) => void;
@@ -126,11 +129,64 @@ type DraftInfo = {
   base_changed?: boolean;
 };
 
+type PageLink = {
+  rel: string;
+  target_page_id?: string;
+  target_path?: string;
+  title?: string;
+};
+
+type PageMetadata = {
+  title?: string;
+  summary?: string;
+  doc_type?: string;
+  status?: string;
+  owners?: string[];
+  reviewers?: string[];
+  tags?: string[];
+  links?: PageLink[];
+  template?: string;
+  created_at?: string;
+  updated_at?: string;
+} | null;
+
+type ExtractedTask = {
+  text: string;
+  checked: boolean;
+  assignee?: string;
+  priority?: string;
+  due_date?: string;
+  collectable: boolean;
+  source_path: string;
+};
+
+type PageLoadInfo = {
+  initialized: boolean;
+  mdwiki_present: boolean | null;
+  metadata_enabled: boolean;
+  page_id?: string;
+  metadata: PageMetadata;
+  headings: string[];
+  outgoing_links: PageLink[];
+  incoming_links: PageLink[];
+  tasks: ExtractedTask[];
+};
+
 type DiagramEditorState = {
   path: string;
   kind: "excalidraw" | "drawio";
   content: string;
 };
+
+type TaskDraft = {
+  title: string;
+  assignee: string;
+  priority: "" | "p0" | "p1" | "p2" | "p3";
+  dueDate: string;
+  collectable: boolean;
+};
+
+const TEMPLATE_OPTIONS = ["blank", "prd", "spec", "detailed_design", "plan", "adr"] as const;
 
 type PendingNavigation =
   | { kind: "path"; value: string }
@@ -258,8 +314,8 @@ function resolveAssetPath(pagePath: string, assetRef: string): string {
   return normalizeSlashPath(combined);
 }
 
-function assetApiURL(space: string, relPath: string): string {
-  return `/api/spaces/${encodeURIComponent(space)}/asset?path=${encodeURIComponent(relPath)}`;
+function repoFileApiURL(space: string, relPath: string): string {
+  return `/api/spaces/${encodeURIComponent(space)}/file?path=${encodeURIComponent(relPath)}`;
 }
 
 function diagramKindForPath(path: string): "excalidraw" | "drawio" | null {
@@ -285,6 +341,10 @@ function isRelativeAssetPath(src: string): boolean {
     return false;
   }
   return !/^(https?:|data:|blob:|\/)/i.test(trimmed);
+}
+
+function isMarkdownPath(src: string): boolean {
+  return /\.md$/i.test(src.trim());
 }
 
 function pageTitle(path: string): string {
@@ -565,6 +625,7 @@ export default function WikiEditor({
   space,
   onSpaceChange,
   onSpacesChanged,
+  onLogout,
   currentUserLogin,
   path,
   onPathChange,
@@ -601,6 +662,8 @@ export default function WikiEditor({
   const [createPageOpen, setCreatePageOpen] = useState(false);
   const [createPageInput, setCreatePageInput] = useState("new-page.md");
   const [createParent, setCreateParent] = useState("current");
+  const [createPageTemplate, setCreatePageTemplate] = useState<(typeof TEMPLATE_OPTIONS)[number]>("blank");
+  const [createPageInsertSections, setCreatePageInsertSections] = useState(false);
   const [pageContextMenu, setPageContextMenu] = useState<{ x: number; y: number; pagePath: string } | null>(null);
   const [spaceContextMenu, setSpaceContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [collapsedPageNodes, setCollapsedPageNodes] = useState<Record<string, boolean>>({});
@@ -613,6 +676,20 @@ export default function WikiEditor({
   const [refreshPrompt, setRefreshPrompt] = useState<RefreshPrompt>(null);
   const [asyncSaveState, setAsyncSaveState] = useState<"idle" | "queued" | "running" | "failed">("idle");
   const [editorSession, setEditorSession] = useState(0);
+  const [pageInfo, setPageInfo] = useState<PageLoadInfo>({
+    initialized: false,
+    mdwiki_present: null,
+    metadata_enabled: false,
+    metadata: null,
+    headings: [],
+    outgoing_links: [],
+    incoming_links: [],
+    tasks: [],
+  });
+  const [taskModalOpen, setTaskModalOpen] = useState(false);
+  const [taskDraft, setTaskDraft] = useState<TaskDraft>({ title: "", assignee: "", priority: "", dueDate: "", collectable: false });
+  const [templateChoice, setTemplateChoice] = useState<(typeof TEMPLATE_OPTIONS)[number]>("blank");
+  const [templateInsertSections, setTemplateInsertSections] = useState(false);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const codeLangHoverRef = useRef(false);
   const popoverHoverRef = useRef(false);
@@ -627,8 +704,12 @@ export default function WikiEditor({
   const markdownRef = useRef(markdown);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [wsReconnectTick, setWsReconnectTick] = useState(0);
-  const canEdit = isEditing && !readOnly;
-  const canComment = !readOnly;
+  const repoReady = pageInfo.initialized;
+  const mdwikiPresent = pageInfo.mdwiki_present;
+  const metadataEnabled = pageInfo.metadata_enabled;
+  const interactionLocked = readOnly || !repoReady;
+  const canEdit = isEditing && !interactionLocked;
+  const canComment = !interactionLocked;
 
   const ydoc = useMemo(() => new Y.Doc(), [editorSession, space, path]);
   const CommentHighlight = useMemo(
@@ -664,6 +745,8 @@ export default function WikiEditor({
         Underline,
         Image,
         Link.configure({ openOnClick: false }),
+        TaskList,
+        TaskItem.configure({ nested: true }),
         Collaboration.configure({
           document: ydoc,
           field: "content",
@@ -1017,9 +1100,32 @@ export default function WikiEditor({
     if (!r.ok) {
       return;
     }
-    const j = (await r.json()) as { content?: string; base_commit?: string };
+    const j = (await r.json()) as {
+      content?: string;
+      base_commit?: string;
+      initialized?: boolean;
+      mdwiki_present?: boolean;
+      metadata_enabled?: boolean;
+      page_id?: string;
+      metadata?: PageMetadata;
+      headings?: string[];
+      outgoing_links?: PageLink[];
+      incoming_links?: PageLink[];
+      tasks?: ExtractedTask[];
+    };
     const md = typeof j.content === "string" ? j.content : DEFAULT_PAGE_TEXT;
     const normalized = canonicalMarkdown(md);
+    setPageInfo({
+      initialized: !!j.initialized,
+      mdwiki_present: typeof j.mdwiki_present === "boolean" ? j.mdwiki_present : null,
+      metadata_enabled: !!j.metadata_enabled,
+      page_id: j.page_id,
+      metadata: j.metadata ?? null,
+      headings: Array.isArray(j.headings) ? j.headings : [],
+      outgoing_links: Array.isArray(j.outgoing_links) ? j.outgoing_links : [],
+      incoming_links: Array.isArray(j.incoming_links) ? j.incoming_links : [],
+      tasks: Array.isArray(j.tasks) ? j.tasks : [],
+    });
     setBaseCommit(typeof j.base_commit === "string" ? j.base_commit : "");
     if (editor) {
       await applyTrustedMarkdown(md);
@@ -1511,6 +1617,10 @@ export default function WikiEditor({
   }, [canEdit, dirty, persistDraft, saving]);
 
   const toggleEditing = useCallback(async () => {
+    if (!repoReady) {
+      setError("Initialize mdwiki for this repo before editing.");
+      return;
+    }
     if (isEditing) {
       if (dirtyRef.current) {
         if (saving) {
@@ -1531,7 +1641,7 @@ export default function WikiEditor({
     setRefreshPrompt(null);
     setEditorSession((n) => n + 1);
     setIsEditing(true);
-  }, [consecutiveSaveFailures, isEditing, save, saving]);
+  }, [consecutiveSaveFailures, isEditing, repoReady, save, saving]);
 
   const cancelPendingNavigation = useCallback(() => {
     if (navigationDecisionBusy) {
@@ -1609,7 +1719,14 @@ export default function WikiEditor({
     }
     setCreateParent("current");
     setCreatePageInput("new-page.md");
+    setCreatePageTemplate("blank");
+    setCreatePageInsertSections(false);
   }, [createPageOpen, path, space]);
+
+  useEffect(() => {
+    setTemplateChoice((pageInfo.metadata?.template as (typeof TEMPLATE_OPTIONS)[number]) || "blank");
+    setTemplateInsertSections(false);
+  }, [pageInfo.metadata?.template, path, space]);
 
   useEffect(() => {
     if (!pageContextMenu && !spaceContextMenu) {
@@ -1676,7 +1793,81 @@ export default function WikiEditor({
     }
   }, [loadSettings, settingsSaveMode]);
 
+  const initializeRepoFeatures = useCallback(async () => {
+    try {
+      setError(null);
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/initialize`, {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!r.ok) {
+        throw new Error(await readApiError(r, "failed to initialize mdwiki for this repo"));
+      }
+      await loadTree();
+      await refreshPageFromHttp();
+      setStatus(`mdwiki initialized ${new Date().toLocaleTimeString()}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to initialize mdwiki for this repo");
+    }
+  }, [loadTree, refreshPageFromHttp, space]);
+
+  const applyTemplateToCurrentPage = useCallback(async (template: (typeof TEMPLATE_OPTIONS)[number], includeSections: boolean) => {
+    if (!metadataEnabled) {
+      setError("Metadata support is disabled on the server.");
+      return;
+    }
+    try {
+      setError(null);
+      const r = await fetch(`/api/spaces/${encodeURIComponent(space)}/templates/apply`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, template, include_sections: includeSections }),
+      });
+      if (!r.ok) {
+        throw new Error(await readApiError(r, "failed to apply template"));
+      }
+      await refreshPageFromHttp();
+      setStatus(`Template applied ${new Date().toLocaleTimeString()}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "failed to apply template");
+    }
+  }, [metadataEnabled, path, refreshPageFromHttp, space]);
+
+  const insertTaskFromDraft = useCallback(() => {
+    if (!editor || !canEdit) {
+      return;
+    }
+    const title = taskDraft.title.trim();
+    if (!title) {
+      setError("Task title is required.");
+      return;
+    }
+    const details: string[] = [];
+    if (taskDraft.assignee.trim()) {
+      details.push(`assignee: ${escapeHTML(taskDraft.assignee.trim())}`);
+    }
+    if (taskDraft.priority) {
+      details.push(`priority: ${escapeHTML(taskDraft.priority)}`);
+    }
+    if (taskDraft.dueDate) {
+      details.push(`due: ${escapeHTML(taskDraft.dueDate)}`);
+    }
+    const suffix = details.length > 0 ? ` <em>(${details.join(", ")})</em>` : "";
+    const taskListHTML = `<ul data-type="taskList"><li data-type="taskItem" data-checked="false"><p>${escapeHTML(title)}${suffix}</p></li></ul>`;
+    const selectionNode = window.getSelection()?.anchorNode;
+    const currentBlock = selectionNode instanceof HTMLElement ? selectionNode.closest("[data-wiki-task-block='true']") : selectionNode?.parentElement?.closest("[data-wiki-task-block='true']");
+    const html = taskDraft.collectable && !currentBlock ? `<div data-wiki-task-block="true">${taskListHTML}</div>` : taskListHTML;
+    editor.chain().focus().insertContent(html).run();
+    setTaskModalOpen(false);
+    setTaskDraft({ title: "", assignee: "", priority: "", dueDate: "", collectable: false });
+  }, [canEdit, editor, taskDraft]);
+
   const createPage = useCallback(async () => {
+    if (!repoReady) {
+      setError("Initialize mdwiki for this repo before creating pages.");
+      return;
+    }
     const nextPathInput = createPageInput.trim();
     if (!nextPathInput) {
       return;
@@ -1701,13 +1892,26 @@ export default function WikiEditor({
       if (typeof j.content === "string") {
         await applyTrustedMarkdown(j.content);
       }
+      const createdPath = j.path ?? finalPath;
+      if (metadataEnabled && createPageTemplate !== "blank") {
+        const templateResp = await fetch(`/api/spaces/${encodeURIComponent(space)}/templates/apply`, {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: createdPath, template: createPageTemplate, include_sections: createPageInsertSections }),
+        });
+        if (!templateResp.ok) {
+          throw new Error(await readApiError(templateResp, "failed to apply template"));
+        }
+      }
       setCreatePageOpen(false);
       await loadTree();
       await loadComments();
+      await refreshPageFromHttp();
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to create page");
     }
-  }, [createPageInput, createParentPrefix, editor, loadComments, loadTree, onPathChange, space]);
+  }, [applyTrustedMarkdown, createPageInput, createPageInsertSections, createPageTemplate, createParentPrefix, editor, loadComments, loadTree, metadataEnabled, onPathChange, refreshPageFromHttp, repoReady, space]);
 
   const createSpace = useCallback(async () => {
     const displayNameInput = window.prompt("New space name", "New Space");
@@ -1809,6 +2013,10 @@ export default function WikiEditor({
   }, [isSpaceCreator, onPathChange, onSpaceChange, onSpacesChanged, selectedSpace, spaces]);
 
   const renamePage = useCallback(async () => {
+    if (!repoReady) {
+      setError("Initialize mdwiki for this repo before renaming pages.");
+      return;
+    }
     const suggestion = path;
     const nextPathInput = window.prompt("Rename page to (relative .md path)", suggestion);
     if (!nextPathInput) {
@@ -1842,10 +2050,15 @@ export default function WikiEditor({
     } catch (e) {
       setError(e instanceof Error ? e.message : "failed to rename page");
     }
-  }, [commitCurrentState, dirty, loadComments, loadTree, onPathChange, path, space]);
+  }, [commitCurrentState, dirty, loadComments, loadTree, onPathChange, path, repoReady, space]);
 
   const deletePage = useCallback(
     async (pagePath: string) => {
+      if (!repoReady) {
+        setError("Initialize mdwiki for this repo before deleting pages.");
+        setPageContextMenu(null);
+        return;
+      }
       const confirmed = window.confirm(`Delete page "${pageTitle(pagePath)}"? This cannot be undone.`);
       if (!confirmed) {
         setPageContextMenu(null);
@@ -1875,11 +2088,16 @@ export default function WikiEditor({
         setPageContextMenu(null);
       }
     },
-    [loadComments, loadTree, onPathChange, path, space],
+    [loadComments, loadTree, onPathChange, path, repoReady, space],
   );
 
   const renamePageAtPath = useCallback(
     async (fromPath: string) => {
+      if (!repoReady) {
+        setError("Initialize mdwiki for this repo before renaming pages.");
+        setPageContextMenu(null);
+        return;
+      }
       const nextPathInput = window.prompt("Rename page to (relative .md path)", fromPath);
       if (!nextPathInput) {
         setPageContextMenu(null);
@@ -1920,7 +2138,7 @@ export default function WikiEditor({
         setPageContextMenu(null);
       }
     },
-    [commitCurrentState, dirty, loadComments, loadTree, onPathChange, path, space],
+    [commitCurrentState, dirty, loadComments, loadTree, onPathChange, path, repoReady, space],
   );
 
   const insertLink = useCallback(() => {
@@ -2173,7 +2391,7 @@ export default function WikiEditor({
         }
         const resolvedPath = resolveAssetPath(path, original);
         img.setAttribute("data-mdwiki-src", original);
-        img.setAttribute("src", assetApiURL(space, resolvedPath));
+        img.setAttribute("src", repoFileApiURL(space, resolvedPath));
         img.classList.add("wiki-embedded-image");
       });
       root.querySelectorAll("a[href]").forEach((anchor) => {
@@ -2201,14 +2419,22 @@ export default function WikiEditor({
         }
         if (isRelativeAssetPath(href)) {
           const resolvedPath = resolveAssetPath(path, href);
-          anchor.setAttribute("target", "_blank");
-          anchor.setAttribute("rel", "noreferrer noopener");
-          anchor.setAttribute("href", assetApiURL(space, resolvedPath));
+          if (isMarkdownPath(resolvedPath) && treeHasPagePath(tree, resolvedPath)) {
+            anchor.setAttribute("data-mdwiki-page", resolvedPath);
+            anchor.setAttribute("href", resolvedPath);
+            anchor.removeAttribute("target");
+            anchor.removeAttribute("rel");
+          } else {
+            anchor.removeAttribute("data-mdwiki-page");
+            anchor.setAttribute("target", "_blank");
+            anchor.setAttribute("rel", "noreferrer noopener");
+            anchor.setAttribute("href", repoFileApiURL(space, resolvedPath));
+          }
         }
       });
     }, 60);
     return () => window.clearTimeout(timer);
-  }, [editor, isEditing, markdown, space]);
+  }, [editor, isEditing, markdown, path, space, tree]);
 
   const activeThread = popover ? threadsByAnchor[popover.anchorId] : undefined;
   const headingValue = editor?.isActive("heading", { level: 1 })
@@ -2353,14 +2579,16 @@ export default function WikiEditor({
             setCreatePageOpen(true);
           }}
           title="Create page"
+          disabled={!repoReady}
         >
           +
         </button>
-        <button type="button" className="active-page-btn" onClick={() => void renamePage()} title="Rename page">
+        <button type="button" className="active-page-btn" onClick={() => void renamePage()} title="Rename page" disabled={!repoReady}>
           {pageTitle(path)}
         </button>
         <div className="spacer" />
         <span className={`mode-badge ${isEditing ? "is-editing" : "is-viewing"}`}>{isEditing ? "Editing" : "Viewing"}</span>
+        {!repoReady ? <span className="sync-badge">Read-only</span> : null}
         {readOnly ? <span className="sync-badge">Read-only: {syncMsg}</span> : null}
         <button
           type="button"
@@ -2368,7 +2596,7 @@ export default function WikiEditor({
           title={isEditing ? "Stop editing" : "Edit page"}
           aria-label={isEditing ? "Stop editing" : "Edit page"}
           onClick={toggleEditing}
-          disabled={readOnly}
+          disabled={interactionLocked}
         >
           <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
             <path
@@ -2461,6 +2689,31 @@ export default function WikiEditor({
         </aside>
 
         <main className="wiki-main">
+          {!repoReady && mdwikiPresent === false ? (
+            <div className="draft-banner refresh-banner">
+              <div>
+                This repo is open in read-only mode. Initializing mdwiki will create `.mdwiki/space.json` and `.mdwiki/index.json`, then enable editing, stable page IDs, and mdwiki features.
+              </div>
+              <div className="draft-banner-actions">
+                <button type="button" onClick={() => void initializeRepoFeatures()}>
+                  Initialize mdwiki
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {pageInfo.metadata ? (
+            <div className="draft-banner" style={{ marginBottom: 12 }}>
+              <div>
+                {[pageInfo.metadata.doc_type, pageInfo.metadata.status].filter(Boolean).join(" · ") || "Metadata enabled"}
+                {pageInfo.metadata.tags && pageInfo.metadata.tags.length > 0 ? ` · ${pageInfo.metadata.tags.join(", ")}` : ""}
+              </div>
+              {(pageInfo.outgoing_links.length > 0 || pageInfo.incoming_links.length > 0) ? (
+                <div style={{ fontSize: "0.9rem", opacity: 0.85 }}>
+                  {pageInfo.outgoing_links.length} outgoing link{pageInfo.outgoing_links.length === 1 ? "" : "s"} · {pageInfo.incoming_links.length} incoming link{pageInfo.incoming_links.length === 1 ? "" : "s"}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="editor-toolbar">
             <select
               className="tool-select"
@@ -2505,6 +2758,17 @@ export default function WikiEditor({
             </IconButton>
             <button type="button" className="tool-btn tool-btn-text" onClick={triggerImageUpload} disabled={!canEdit}>
               Image
+            </button>
+            <button
+              type="button"
+              className="tool-btn tool-btn-text"
+              onClick={() => {
+                setTaskDraft({ title: "", assignee: "", priority: "", dueDate: "", collectable: false });
+                setTaskModalOpen(true);
+              }}
+              disabled={!canEdit}
+            >
+              Task
             </button>
             <button type="button" className="tool-btn tool-btn-text" onClick={() => void createDiagramAsset("excalidraw")} disabled={!canEdit}>
               Excalidraw
@@ -2624,10 +2888,18 @@ export default function WikiEditor({
                     void openDiagramEditor(diagramPath).catch((err) => setError(err instanceof Error ? err.message : "diagram load failed"));
                     return;
                   }
-                  if (diagramPath && action === "open") {
-                    window.open(assetApiURL(space, resolveAssetPath(path, diagramPath)), "_blank", "noopener,noreferrer");
+                if (diagramPath && action === "open") {
+                    window.open(repoFileApiURL(space, resolveAssetPath(path, diagramPath)), "_blank", "noopener,noreferrer");
                     return;
                   }
+                }
+                const pageLink = target?.closest("a[data-mdwiki-page]") as HTMLElement | null;
+                const linkedPage = (pageLink?.getAttribute("data-mdwiki-page") || "").trim();
+                if (linkedPage) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  navigateToPath(linkedPage);
+                  return;
                 }
                 setContextMenu(null);
               }}
@@ -2963,6 +3235,57 @@ export default function WikiEditor({
                       {settingsSaving ? "Saving…" : "Apply"}
                     </button>
                   </div>
+
+                  {!repoReady && mdwikiPresent === false ? (
+                    <>
+                      <div className="settings-label">Repo Initialization</div>
+                      <div className="settings-inline">
+                        <span>This repo is still read-only.</span>
+                        <button type="button" onClick={() => void initializeRepoFeatures()}>
+                          Initialize mdwiki
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+
+                  {repoReady && metadataEnabled ? (
+                    <>
+                      <div className="settings-label">Template</div>
+                      <div className="settings-inline">
+                        <select value={templateChoice} onChange={(e) => setTemplateChoice(e.target.value as (typeof TEMPLATE_OPTIONS)[number])}>
+                          {TEMPLATE_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt === "blank" ? "None" : opt}
+                            </option>
+                          ))}
+                        </select>
+                        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <input
+                            type="checkbox"
+                            checked={templateInsertSections}
+                            onChange={(e) => setTemplateInsertSections(e.target.checked)}
+                          />
+                          Insert suggested sections
+                        </label>
+                        <button type="button" onClick={() => void applyTemplateToCurrentPage(templateChoice, templateInsertSections)}>
+                          Apply
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+
+                  <div className="settings-label">Session</div>
+                  <div className="settings-inline">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettingsOpen(false);
+                        void onLogout();
+                      }}
+                    >
+                      Logout
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -2997,6 +3320,30 @@ export default function WikiEditor({
                       ))}
                     </select>
                   </label>
+                  {metadataEnabled ? (
+                    <>
+                      <label>
+                        Template
+                        <select value={createPageTemplate} onChange={(e) => setCreatePageTemplate(e.target.value as (typeof TEMPLATE_OPTIONS)[number])}>
+                          {TEMPLATE_OPTIONS.map((opt) => (
+                            <option key={opt} value={opt}>
+                              {opt === "blank" ? "None" : opt}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {createPageTemplate !== "blank" ? (
+                        <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <input
+                            type="checkbox"
+                            checked={createPageInsertSections}
+                            onChange={(e) => setCreatePageInsertSections(e.target.checked)}
+                          />
+                          Insert suggested template sections
+                        </label>
+                      ) : null}
+                    </>
+                  ) : null}
                   <div className="create-page-preview">Creates: {createPageSuggestion}</div>
                   <div className="settings-inline">
                     <button type="button" onClick={() => setCreatePageOpen(false)}>
@@ -3104,6 +3451,57 @@ export default function WikiEditor({
                   </button>
                   <button type="button" onClick={() => void saveDiagramEditor()}>
                     Save diagram
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {taskModalOpen ? (
+            <div className="settings-backdrop" onClick={() => setTaskModalOpen(false)}>
+              <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="settings-header">
+                  <strong>Create task</strong>
+                  <button type="button" className="top-icon-btn" onClick={() => setTaskModalOpen(false)} title="Close">
+                    x
+                  </button>
+                </div>
+                <label>
+                  Task title
+                  <input value={taskDraft.title} onChange={(e) => setTaskDraft((prev) => ({ ...prev, title: e.target.value }))} />
+                </label>
+                <label>
+                  Assignee
+                  <input value={taskDraft.assignee} onChange={(e) => setTaskDraft((prev) => ({ ...prev, assignee: e.target.value }))} placeholder="@name" />
+                </label>
+                <label>
+                  Priority
+                  <select value={taskDraft.priority} onChange={(e) => setTaskDraft((prev) => ({ ...prev, priority: e.target.value as TaskDraft["priority"] }))}>
+                    <option value="">None</option>
+                    <option value="p0">p0</option>
+                    <option value="p1">p1</option>
+                    <option value="p2">p2</option>
+                    <option value="p3">p3</option>
+                  </select>
+                </label>
+                <label>
+                  Due date
+                  <input type="date" value={taskDraft.dueDate} onChange={(e) => setTaskDraft((prev) => ({ ...prev, dueDate: e.target.value }))} />
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={taskDraft.collectable}
+                    onChange={(e) => setTaskDraft((prev) => ({ ...prev, collectable: e.target.checked }))}
+                  />
+                  Mark this block for task collection
+                </label>
+                <div className="settings-inline">
+                  <button type="button" onClick={() => setTaskModalOpen(false)}>
+                    Cancel
+                  </button>
+                  <button type="button" onClick={insertTaskFromDraft}>
+                    Insert task
                   </button>
                 </div>
               </div>

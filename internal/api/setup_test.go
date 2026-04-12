@@ -388,6 +388,9 @@ func TestGetPageAndSavePageLocalMode(t *testing.T) {
 		},
 	}
 	srv := newTestServer(t, store)
+	if _, err := ensureInitialized(root, "main"); err != nil {
+		t.Fatalf("ensureInitialized: %v", err)
+	}
 
 	req := withURLParam(httptest.NewRequest(http.MethodGet, "/api/spaces/main/page?path=README.md", nil), "space", "main")
 	rr := httptest.NewRecorder()
@@ -441,6 +444,9 @@ func TestCreatePageAndListPagesLocalMode(t *testing.T) {
 		},
 	}
 	srv := newTestServer(t, store)
+	if _, err := ensureInitialized(root, "main"); err != nil {
+		t.Fatalf("ensureInitialized: %v", err)
+	}
 
 	req := withURLParam(httptest.NewRequest(http.MethodPost, "/api/spaces/main/pages", strings.NewReader(`{"path":"guide/start"}`)), "space", "main")
 	rr := httptest.NewRecorder()

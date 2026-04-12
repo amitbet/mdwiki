@@ -10,6 +10,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"mdwiki/internal/indexbuilder"
+	"mdwiki/internal/metadata"
 	"mdwiki/internal/session"
 	wshub "mdwiki/internal/ws"
 )
@@ -76,6 +78,10 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		http.Error(w, "unknown space", http.StatusNotFound)
+		return
+	}
+	if !spaceInitialized(root) {
+		http.Error(w, "space not initialized; initialize mdwiki for this repo first", http.StatusConflict)
 		return
 	}
 	var body createPageBody
@@ -152,6 +158,10 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if _, err := s.syncIndexFile(r.Context(), r, root, spaceKey, ent.Branch); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	s.Hub.BroadcastControlToSpace(spaceKey, wshub.Control{Type: wshub.MsgPagesInvalidated})
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": relPath, "content": seed})
 }
@@ -165,6 +175,10 @@ func (s *Server) renamePage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		http.Error(w, "unknown space", http.StatusNotFound)
+		return
+	}
+	if !spaceInitialized(root) {
+		http.Error(w, "space not initialized; initialize mdwiki for this repo first", http.StatusConflict)
 		return
 	}
 	var body renamePageBody
@@ -270,6 +284,27 @@ func (s *Server) renamePage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if doc, err := indexbuilder.RenamePage(root, fromPath, toPath); err == nil {
+		if err := s.writeIndexDoc(r.Context(), r, root, ent.Branch, doc, "wiki: update routing index for rename"); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		if _, reindexErr := s.syncIndexFile(r.Context(), r, root, spaceKey, ent.Branch); reindexErr != nil {
+			http.Error(w, reindexErr.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+	if s.Cfg.UseMetadata {
+		oldMeta := metadata.SidecarRelPath(fromPath)
+		newMeta := metadata.SidecarRelPath(toPath)
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(oldMeta))); err == nil {
+			if err := s.renameManagedFile(r.Context(), r, root, ent.Branch, oldMeta, newMeta); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
 	s.Hub.BroadcastControlToSpace(spaceKey, wshub.Control{Type: wshub.MsgPagesInvalidated})
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": toPath})
 }
@@ -283,6 +318,10 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 	}
 	if !ok {
 		http.Error(w, "unknown space", http.StatusNotFound)
+		return
+	}
+	if !spaceInitialized(root) {
+		http.Error(w, "space not initialized; initialize mdwiki for this repo first", http.StatusConflict)
 		return
 	}
 
@@ -361,6 +400,19 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if _, err := s.syncIndexFile(r.Context(), r, root, spaceKey, ent.Branch); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if s.Cfg.UseMetadata {
+		metaRel := metadata.SidecarRelPath(relPath)
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(metaRel))); err == nil {
+			if err := s.deleteManagedFile(r.Context(), r, root, ent.Branch, metaRel); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
 	s.Hub.BroadcastControlToSpace(spaceKey, wshub.Control{Type: wshub.MsgPagesInvalidated})
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "path": relPath})
 }
@@ -384,7 +436,7 @@ func buildPageTree(root string) ([]pageTreeNode, error) {
 			return err
 		}
 		if info.IsDir() {
-			if info.Name() == ".git" || info.Name() == ".mdwiki" {
+			if shouldSkipTreeDir(root, path, info) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -450,4 +502,17 @@ func buildPageTree(root string) ([]pageTreeNode, error) {
 	}
 
 	return fold(rootFolder), nil
+}
+
+func shouldSkipTreeDir(root, path string, info os.FileInfo) bool {
+	if path == root {
+		return false
+	}
+	if strings.HasPrefix(info.Name(), ".") {
+		return true
+	}
+	if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+		return true
+	}
+	return false
 }

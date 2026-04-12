@@ -490,6 +490,22 @@ export default function App() {
     window.location.href = "/auth/github";
   }, []);
 
+  const logout = useCallback(async () => {
+    try {
+      await fetch("/auth/logout", {
+        method: "POST",
+        credentials: "include",
+      });
+    } finally {
+      setSession(null);
+      setSpaces(null);
+      setSetup(null);
+      setPendingJobs([]);
+      setDeviceFlow(null);
+      setDeviceError(null);
+    }
+  }, []);
+
   const startDeviceLogin = useCallback(async () => {
     setDeviceError(null);
     setDeviceBusy(true);
@@ -626,6 +642,7 @@ export default function App() {
           setPath("README.md");
         }}
         onSpacesChanged={loadSpaces}
+        onLogout={logout}
         currentUserLogin={session.login}
         path={path}
         onPathChange={setPath}

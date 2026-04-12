@@ -105,6 +105,15 @@ td.addRule("wikiCommentHighlight", {
   },
 });
 
+td.addRule("wikiTaskBlock", {
+  filter(node) {
+    return node instanceof HTMLElement && node.tagName === "DIV" && node.getAttribute("data-wiki-task-block") === "true";
+  },
+  replacement(content) {
+    return `\n<!-- wiki:tasks:start -->\n${content.trim()}\n<!-- wiki:tasks:end -->\n`;
+  },
+});
+
 td.addRule("mdwikiDiagram", {
   filter(node) {
     return node instanceof HTMLElement && node.tagName === "DIV" && node.hasAttribute("data-mdwiki-diagram");
